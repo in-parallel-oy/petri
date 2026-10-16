@@ -247,6 +247,11 @@ impl FailureClassifier for ReferenceClassifier {
             FailureCategory::TransientInfra
         } else if class.contains("interrupt") || class.contains("cancel") {
             FailureCategory::Canceled
+        } else if class.starts_with("exit_status:") {
+            // A command's output is diagnostic evidence, not a category hint.
+            // Keep it in the reason for users and signature tracking, but do
+            // not let line numbers or identifiers override its exit status.
+            FailureCategory::Deterministic
         } else {
             classify(reason)
         };
@@ -464,6 +469,81 @@ mod tests {
             classify("commit 0a503fb9c is bad"),
             FailureCategory::Deterministic
         );
+    }
+
+    #[test]
+    fn command_diagnostics_do_not_override_exit_status() {
+        for diagnostic in [
+            "src/domain/order.py:42:5: F401 unused import",
+            "src/domain/order.py:500:5: F401 unused import",
+            "src/domain/order.py:502:5: F401 unused import",
+            "src/domain/order.py:503:5: F401 unused import",
+            "src/domain/order.py:504:5: F401 unused import",
+            "error: this argument is passed by value\n --> crates/domain/src/lib.rs:500:13",
+            "FAILED tests/test_retry.py::test_timeout",
+            "error: undefined name `budget`",
+            "error: undefined name `cancel`",
+            "assertion failed: expected HTTP 503 Service Unavailable",
+        ] {
+            for code in [1, 101] {
+                let reason = format!("script exited with status {code}\n{diagnostic}");
+                let outcome = Outcome::new(
+                    Status::Failure(
+                        FailureInfo::new(&reason).with_class(FailureClass::exit_status(code)),
+                    ),
+                    Value::Null,
+                );
+                let failure = ReferenceClassifier.classify(&outcome).expect("a failure");
+                assert_eq!(failure.category, FailureCategory::Deterministic, "{reason}");
+                assert!(failure.category.is_signature_tracked());
+                assert_eq!(failure.reason, reason, "diagnostics remain available");
+            }
+        }
+    }
+
+    #[test]
+    fn structured_and_infrastructure_failures_keep_their_categories() {
+        for (status, category) in [
+            (Status::TimedOut, FailureCategory::TransientInfra),
+            (Status::Cancelled, FailureCategory::Canceled),
+            (
+                Status::Failure(
+                    FailureInfo::new("budget").with_class(FailureClass::new("timeout")),
+                ),
+                FailureCategory::TransientInfra,
+            ),
+            (
+                Status::Failure(
+                    FailureInfo::new("HTTP 503").with_class(FailureClass::new("cancelled")),
+                ),
+                FailureCategory::Canceled,
+            ),
+            (
+                Status::failure("HTTP 502 Bad Gateway"),
+                FailureCategory::TransientInfra,
+            ),
+            (
+                Status::Failure(
+                    FailureInfo::new("connection refused")
+                        .with_class(FailureClass::new("spawn_failed")),
+                ),
+                FailureCategory::TransientInfra,
+            ),
+            (
+                Status::failure("token budget exhausted"),
+                FailureCategory::BudgetExhausted,
+            ),
+            (
+                Status::failure("commit 0a503fb9c is bad"),
+                FailureCategory::Deterministic,
+            ),
+        ] {
+            let outcome = Outcome::new(status, Value::Null);
+            assert_eq!(
+                ReferenceClassifier.classify(&outcome).map(|f| f.category),
+                Some(category)
+            );
+        }
     }
 
     #[test]

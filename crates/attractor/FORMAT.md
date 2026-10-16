@@ -1507,7 +1507,11 @@ middleware (`host::policy_middleware`), on run and on resume. After every
 node's final outcome a failure is classified into Fabro's categories
 (`transient_infra`, `deterministic`, `budget_exhausted`, `compilation_loop`,
 `canceled`, `structural`, from the failure class and the reference's message
-hints) and a signature `<node>|<category>|<normalized reason>`. A
+hints) and a signature `<node>|<category>|<normalized reason>`. A command's
+`exit_status:<code>` class is deterministic: its captured diagnostics stay
+in the failure reason and `command.output`, but do not supply category hints.
+Structured timeouts and cancellation keep their categories; failures without
+one of these recognized classes still use the reference's message hints. A
 `deterministic` or `structural` signature is counted; reaching the limit
 blocks the failed firing's route with `deterministic failure cycle detected`,
 which fails the run. A `loop_restart` edge is blocked for any classified

@@ -240,6 +240,98 @@ async fn a_restart_edge_admits_only_transient_failures() {
     assert_eq!(document.executions.len(), 2, "one restart, then success");
 }
 
+/// Real command diagnostics stay deterministic both on normal loop edges
+/// (where repeats must trip the breaker) and on transient-only restarts.
+#[tokio::test]
+async fn command_diagnostics_cannot_bypass_the_breaker() {
+    check_command_diagnostics(false).await;
+}
+
+#[tokio::test]
+async fn command_diagnostics_cannot_take_a_restart_edge() {
+    check_command_diagnostics(true).await;
+}
+
+async fn check_command_diagnostics(restart: bool) {
+    for diagnostic in [
+        "src/domain/order.py:42:5: F401 unused import",
+        "src/domain/order.py:502:5: F401 unused import",
+        "error: passed by value at crates/domain/src/lib.rs:500:13",
+        "FAILED tests/test_retry.py::test_timeout",
+        "error: undefined name budget",
+    ] {
+        let dir = RunDir::new("breaker-command-diagnostics");
+        let rt = runtime(&dir);
+        let workflow = format!(
+            r#"digraph G {{
+                    graph [loop_restart_signature_limit=3]
+                    start [shape=Mdiamond]
+                    exit [shape=Msquare]
+                    work [shape=parallelogram, max_visits=4,
+                          script="echo '{diagnostic}' >&2; exit 1"]
+                    start -> work
+                    work -> work [condition="outcome=failed", loop_restart={restart}]
+                    work -> exit
+                }}"#
+        );
+        let graph = lower(&rt, &dir, &workflow).graph.expect("lowers");
+        let report = host::run_configured(&rt, HostRun::new(graph), |_, _| {})
+            .await
+            .expect("the run completes");
+        assert_eq!(report.status, RunStatus::Failed);
+        assert_eq!(
+            firings_of(&report, "work"),
+            if restart { 1 } else { 3 },
+            "{diagnostic}, restart={restart}: {:?}",
+            report.state.errors()
+        );
+        let reason = report
+            .state
+            .errors()
+            .iter()
+            .find_map(|error| match error {
+                RunError::RoutingBlocked { reason, .. } => Some(reason.as_str()),
+                _ => None,
+            })
+            .expect("the breaker blocks the route");
+        if restart {
+            assert!(
+                reason.contains("loop_restart blocked: failure_class=deterministic"),
+                "{reason}"
+            );
+        } else {
+            assert!(
+                reason.contains("deterministic failure cycle detected"),
+                "{reason}"
+            );
+            assert!(reason.contains("repeated 3 times (limit 3)"), "{reason}");
+        }
+        let record = report
+            .state
+            .history()
+            .iter()
+            .find(|r| r.name == "work")
+            .expect("command record");
+        let info = record
+            .outcome
+            .status
+            .failure_info()
+            .expect("command failure");
+        assert_eq!(info.class.as_str(), "exit_status:1");
+        assert!(info.message.contains(diagnostic), "{}", info.message);
+        assert_eq!(
+            record.outcome.output["stdout"],
+            json!(format!("{diagnostic}\n"))
+        );
+        assert_eq!(
+            report.state.run_context().get("command.output"),
+            Some(&json!(format!("{diagnostic}\n")))
+        );
+        let document = inspect_run_dir(dir.path()).await.expect("inspects");
+        assert_eq!(document.executions.len(), 1, "no restart: {diagnostic}");
+    }
+}
+
 /// Node visit totals survive a `loop_restart` while the context is
 /// replaced: `max_visits=2` is reached on the third execution's visit, not
 /// reset by the restart.
