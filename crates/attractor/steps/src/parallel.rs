@@ -15,7 +15,10 @@
 //! The step's output is `{ snapshot, nodes, occurrence }`, where
 //! `occurrence` is `{ fork, firing }`: this visit of the parallel node, which
 //! every branch's call slot and every `fabro.parallel.*` event of the visit
-//! names. The parent's own `kv` is not changed.
+//! names. A dynamic fork also outputs its hydrated source array as `items`.
+//! Expansion reads that field from the fork's record; the outgoing edge
+//! omits it from the tokens copied to branches. The parent's own `kv` is
+//! not changed.
 //!
 //! The branch step is the parent-side half of one branch. It takes the fork
 //! snapshot from its input, starts the branch's child graph as an internal
@@ -51,8 +54,8 @@ use execution::{
 };
 use frontend_attractor::hooks::HookEvent;
 use frontend_attractor::kinds::{
-    BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND, FORK_NODES_FIELD,
-    FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, StageOutcome,
+    BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_ITEMS_FIELD, FORK_KIND,
+    FORK_NODES_FIELD, FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, StageOutcome,
 };
 use ir::placeholder::{is_placeholder_item, placeholder_item};
 use ir::{
@@ -142,6 +145,30 @@ impl Step for ForkStep {
     type Config = ForkConfig;
 
     async fn run(&self, config: ForkConfig, ctx: StepCtx) -> Outcome {
+        // Resolve only the source itself: inline item values remain data,
+        // and neither the parent's context nor its fork snapshot is hydrated.
+        let items = if let Some(key) = &config.source {
+            let mut value = config.kv.get(key).cloned().unwrap_or(Value::Null);
+            if value.is_string()
+                && let Some(store) = ctx.capability::<OutputStore>()
+            {
+                value = blobs::hydrate(value, store.0.as_ref()).await;
+            }
+            let Value::Array(items) = value else {
+                return Outcome::failure(format!(
+                    "for_each source `{key}` must resolve to an array"
+                ));
+            };
+            if items.len() as u64 > frontend_attractor::MAX_FOR_EACH_ITEMS {
+                return Outcome::failure(format!(
+                    "for_each source `{key}` exceeds the {}-item limit",
+                    frontend_attractor::MAX_FOR_EACH_ITEMS
+                ));
+            }
+            Some(items)
+        } else {
+            None
+        };
         parallel_start(&ctx, &config).await;
         let mut snapshot = config.kv;
         let mut nodes = config.nodes;
@@ -162,11 +189,15 @@ impl Step for ForkStep {
             }
             blobs::offload_above(&mut nodes, store, blobs::FAN_OUT_OFFLOAD_THRESHOLD).await;
         }
-        Outcome::success(json!({
+        let mut output = json!({
             FORK_SNAPSHOT_FIELD: snapshot,
             FORK_NODES_FIELD: nodes,
             FORK_OCCURRENCE_FIELD: { "fork": config.node, "firing": ctx.firing.raw() },
-        }))
+        });
+        if let Some(items) = items {
+            output[FORK_ITEMS_FIELD] = Value::Array(items);
+        }
+        Outcome::success(output)
     }
 }
 

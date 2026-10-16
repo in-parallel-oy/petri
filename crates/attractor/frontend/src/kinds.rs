@@ -45,6 +45,9 @@ pub const FORK_NODES_FIELD: &str = "nodes";
 /// event of one fork visit names the same occurrence the typed
 /// `fork_started` does.
 pub const FORK_OCCURRENCE_FIELD: &str = "occurrence";
+/// The hydrated source array on a dynamic fork's output. Expansion reads it
+/// from the fork's record; it is excluded from branch input tokens.
+pub const FORK_ITEMS_FIELD: &str = "items";
 /// The context key a branch child reads the parent's stage records from: the
 /// fork snapshot its preamble is rendered from, since the child's own records
 /// are empty when its target starts.

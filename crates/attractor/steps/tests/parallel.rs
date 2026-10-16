@@ -10,7 +10,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs, thread};
 
-use attractor_steps::blobs::{holds_ref, hydrate};
+use attractor_steps::blobs::{BlobStore as _, holds_ref, hydrate};
+use attractor_steps::parallel::fenced_item;
 use attractor_steps::{
     AGENT_KIND, BLOBS_DIR, BranchStep, CommandStep, FanInStep, ForkStep, HUMAN_KIND,
     LocalBlobStore, STAGE_KIND, StubStep, WAIT_KIND, WORKFLOW_KIND,
@@ -23,6 +24,7 @@ use execution::host::{self, HostRun};
 use execution::inspect::{InvocationInspection, RunInspection, inspect_run_dir};
 use execution::{CoordinatorEvent, ExecutionObserver};
 use frontend::{CompileInputs, Lowered, NoFiles};
+use frontend_attractor::kinds::BRANCH_ITEM_KEY;
 use ir::StepEvent;
 use runtime::driver::{BranchRole, ExecutionReport};
 use runtime::engine::Event;
@@ -738,6 +740,142 @@ async fn for_each_items_are_labelled_and_ordered_by_index() {
         assert_eq!(envelope["status"], json!("succeeded"));
     }
     assert_eq!(invocation_count(dir.path()).await, 4);
+}
+
+/// Routing output crosses the context offload boundary before the fork.
+/// Stored and inline lists must declare the same ordered branch item data.
+#[tokio::test]
+async fn for_each_reads_artifact_backed_routing_items() {
+    for width in [10, 50_000] {
+        let dir = RunDir::new("parallel-stored-items");
+        let rt = runtime(dir.path());
+        let workflow = fan_out_over(3).replace("* 100", &format!("* {width}"));
+        let (report, events) = run_projected(&rt, lower(&workflow), |_| {}).await;
+        let jobs = &report.state.run_context().kv["jobs"];
+        assert_eq!(holds_ref(jobs), width == 50_000);
+        assert_eq!(
+            report.status,
+            RunStatus::Success,
+            "{:?}",
+            report.state.errors()
+        );
+        let inspection = inspect_run_dir(dir.path()).await.expect("inspects");
+        let children = children_of(&inspection, "fan");
+        assert_eq!(children.len(), 3);
+        for (index, child) in children.iter().enumerate() {
+            let item = &child.context[BRANCH_ITEM_KEY];
+            let expected = json!({"name": format!("job-{index}"), "brief": "x".repeat(width)});
+            assert_eq!(item, &json!(fenced_item(&expected)));
+            assert!(holds_ref(&child.context["jobs"]));
+        }
+        assert_eq!(published_results(&report).len(), 3);
+        let snapshots: Vec<_> = events
+            .iter()
+            .filter_map(|event| match event.engine() {
+                Some(Event::TokenEmitted { token }) if token.payload.get("snapshot").is_some() => {
+                    Some(&token.payload)
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!snapshots.is_empty());
+        assert!(
+            snapshots
+                .iter()
+                .all(|payload| payload.get("items").is_none()),
+            "branch tokens must not copy the whole list"
+        );
+        assert_replay_matches(dir.path(), &events).await;
+    }
+}
+
+/// An explicitly stored empty list retains the zero-branch join behavior.
+#[tokio::test]
+async fn an_artifact_backed_empty_for_each_list_joins_without_children() {
+    let dir = RunDir::new("parallel-stored-empty");
+    let store = LocalBlobStore::new(dir.path().join(BLOBS_DIR));
+    let digest = store.put(b"[]").await.expect("stores empty list");
+    let source = json!(format!("blob://sha256/{digest}#json"));
+    let jobs = source.to_string().replace('"', "\\\"");
+    let report = run(
+        &runtime(dir.path()),
+        lower(&dot(&FOR_EACH.replace("JOBS", &jobs))),
+    )
+    .await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    assert_eq!(report.state.run_context().get("jobs"), Some(&source));
+    assert_eq!(published_results(&report), Vec::<Value>::new());
+    assert_eq!(invocation_count(dir.path()).await, 1);
+}
+
+/// A missing blob, malformed JSON or a stored non-array must fail before
+/// declaring children, rather than treating the reference text as items.
+#[tokio::test]
+async fn invalid_artifact_backed_for_each_sources_fail_without_children() {
+    for bytes in [None, Some(b"not json".as_slice()), Some(b"{}".as_slice())] {
+        let dir = RunDir::new("parallel-invalid-stored-items");
+        let store = LocalBlobStore::new(dir.path().join(BLOBS_DIR));
+        let digest = match bytes {
+            Some(bytes) => store.put(bytes).await.expect("stores invalid source"),
+            None => "0".repeat(64),
+        };
+        let source = json!(format!("blob://sha256/{digest}#json"));
+        let jobs = source.to_string().replace('"', "\\\"");
+        let report = run(
+            &runtime(dir.path()),
+            lower(&dot(&FOR_EACH.replace("JOBS", &jobs))),
+        )
+        .await;
+        assert_eq!(report.status, RunStatus::Failed);
+        assert_eq!(invocation_count(dir.path()).await, 1);
+        assert_eq!(status_of(&report, "fan").as_deref(), Some("failure"));
+        assert!(
+            report
+                .state
+                .history()
+                .iter()
+                .all(|r| !r.name.starts_with("job"))
+        );
+    }
+}
+
+/// The cap applies to the array length after hydration, never to the
+/// reference string's length.
+#[tokio::test]
+async fn oversized_for_each_lists_fail_before_creating_branches() {
+    for stored in [false, true] {
+        let dir = RunDir::new("parallel-too-many-items");
+        let mut source = json!(vec![0; 1_001]);
+        if stored {
+            let store = LocalBlobStore::new(dir.path().join(BLOBS_DIR));
+            let digest = store
+                .put(&serde_json::to_vec(&source).expect("JSON"))
+                .await
+                .expect("stores list");
+            source = json!(format!("blob://sha256/{digest}#json"));
+        }
+        let jobs = source.to_string().replace('"', "\\\"");
+        let report = run(
+            &runtime(dir.path()),
+            lower(&dot(&FOR_EACH.replace("JOBS", &jobs))),
+        )
+        .await;
+        assert_eq!(report.status, RunStatus::Failed);
+        assert_eq!(invocation_count(dir.path()).await, 1);
+        assert_eq!(status_of(&report, "fan").as_deref(), Some("failure"));
+        assert!(
+            report
+                .state
+                .history()
+                .iter()
+                .all(|r| !r.name.starts_with("job"))
+        );
+    }
 }
 
 /// A fork visited twice is two fork occurrences: each visit's `fork_started`,

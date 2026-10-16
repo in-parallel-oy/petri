@@ -24,10 +24,12 @@
 //! source list and every other large value to the run's output store, so
 //! the snapshot every branch child is declared from, and every clone's input
 //! token, hold references instead of O(items) copies. Its output is
-//! `{ snapshot, nodes }`, and the branch delegates read their `kv` and
-//! `nodes` from it. A snapshot key a branch's own graph reads by expression
-//! (the source list of a `for_each` nested inside a static branch) is named
-//! in the fork's `inline` list and stays inline.
+//! `{ snapshot, nodes, occurrence }`, plus the hydrated `items` for a dynamic
+//! fork. Expansion reads `items` from the fork's record; the edge excludes
+//! it from the token the branch delegates read their `kv` and `nodes` from. A
+//! snapshot key a branch's own graph reads by expression (the source list of a
+//! `for_each` nested inside a static branch) is named in the fork's `inline`
+//! list and stays inline.
 //!
 //! The fan-in the branches join at collects the envelopes in branch order,
 //! publishes `parallel.results` and `parallel.branch_count`, and takes the
@@ -52,10 +54,10 @@ use ir::{
 };
 use serde_json::{Map, Value, json};
 
-use super::{Ctx, Kind, MAX_FOR_EACH_ITEMS, NodeRef, attrs, placeholder, threads};
+use super::{Ctx, Kind, NodeRef, attrs, placeholder, threads};
 use crate::kinds::{
-    AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_KIND,
-    FORK_NODES_FIELD, FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
+    AGENT_KIND, BRANCH_ITEM_KEY, BRANCH_KIND, BRANCH_NODES_KEY, FAN_IN_KIND, FORK_ITEMS_FIELD,
+    FORK_KIND, FORK_NODES_FIELD, FORK_OCCURRENCE_FIELD, FORK_SNAPSHOT_FIELD, PROMPT_KIND,
 };
 use crate::model::{AttrValue, EdgeDecl, NodeDecl, Workflow};
 
@@ -585,39 +587,36 @@ impl Ctx<'_> {
         let (collector, join) = self.branch_collector(fork, workflow, forks)?;
         let child = self.branch_child(&template.to, &[target], None)?;
 
-        // The expansion reads the item array from the context itself, so
-        // the fork's output (the snapshot every clone receives as its input
-        // token) never carries the list. An empty array becomes the IR's one
-        // placeholder item, so the template still fires once (starting no
-        // child) and the fan-in still joins; the clone is no branch to a
-        // host.
+        // The fork hydrates and validates the source once. Expansion reads
+        // its output record, while the edge carries only the compact
+        // snapshot so no clone's token contains the whole list.
         let items = {
             let exprs = self.b.exprs();
-            let kv = exprs.var("kv");
-            let name = exprs.lit(key.as_str());
-            let items = exprs.call("get", vec![kv, name]);
-            let null = exprs.lit(Value::Null);
-            let present = exprs.binary(BinOp::Ne, items, null);
+            let items = exprs.path("nodes", &[&fork.decl.id, "output", FORK_ITEMS_FIELD]);
             let len = exprs.call("len", vec![items]);
             let zero = exprs.lit(0);
             let empty = exprs.binary(BinOp::Eq, len, zero);
-            let both = exprs.binary(BinOp::And, present, empty);
             let marker = exprs.lit(placeholder_item());
             let placeholder_list = exprs.array(vec![marker]);
-            exprs.cond(both, placeholder_list, items)
+            exprs.cond(empty, placeholder_list, items)
         };
         self.fork_step(fork, Some(&key), &BTreeSet::new(), true);
-        let cap = {
+        let payload = {
             let exprs = self.b.exprs();
-            let kv = exprs.var("kv");
-            let name = exprs.lit(key.as_str());
-            let items = exprs.call("get", vec![kv, name]);
-            let len = exprs.call("len", vec![items]);
-            let limit = exprs.lit(MAX_FOR_EACH_ITEMS);
-            exprs.binary(BinOp::Le, len, limit)
+            let output = exprs.var("output");
+            let snapshot = exprs.field(output, FORK_SNAPSHOT_FIELD);
+            let nodes = exprs.field(output, FORK_NODES_FIELD);
+            let occurrence = exprs.field(output, FORK_OCCURRENCE_FIELD);
+            exprs.object(vec![
+                (FORK_SNAPSHOT_FIELD, snapshot),
+                (FORK_NODES_FIELD, nodes),
+                (FORK_OCCURRENCE_FIELD, occurrence),
+            ])
         };
-        self.b.set_precondition(fork.id, cap);
-        self.b.link(fork.id, target);
+        let success = self.b.exprs().call("success", vec![]);
+        let mut edge = Edge::when(self.b.next_edge_id(), target, success);
+        edge.map = Some(payload);
+        self.b.node_mut(fork.id).routing = Routing::next(edge);
         self.branch_step(
             target,
             fork,

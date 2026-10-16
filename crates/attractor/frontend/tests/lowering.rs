@@ -829,7 +829,10 @@ fn for_each_lowers_to_an_expansion_on_the_template_node() {
     assert!(contains_placeholder(&job.step.config["kv"]));
     assert!(contains_placeholder(&job.step.config["nodes"]));
     let fan = node(&graph, "fan");
-    assert!(fan.precondition.is_some(), "the item cap is a precondition");
+    assert!(
+        fan.precondition.is_none(),
+        "the fork validates the hydrated list"
+    );
     // The parallel node is the fork step: it snapshots `kv` and the stage
     // records once, and offloads the source list at any size.
     assert_eq!(fan.step.kind, FORK_KIND);
