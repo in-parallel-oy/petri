@@ -50,7 +50,7 @@ use crate::fidelity::{
 };
 use crate::outcome::{ExplicitRoutes, Stage};
 use crate::pebble::{PebbleClient, Resume};
-use crate::sessions::{Retained, SessionService};
+use crate::sessions::{self, Retained, SessionService};
 use crate::stage::{self, RunInfo};
 
 pub const KIND: StepKindId = AGENT_KIND;
@@ -322,6 +322,9 @@ impl Step for AgentStep {
         // documents.
         let sessions = ctx.capability::<SessionService>();
         let mut resolved = config.resolve(false);
+        // A summary rebuild still belongs to a full-fidelity thread. Keep
+        // its successful export so only the first node needs the fallback.
+        let retain_thread = resolved.fidelity == Fidelity::Full;
         let mut retained: Option<Retained> = None;
         // A native node's fallback plan: its route, then the configured
         // chain for that model. An ACP node has no plan (the command owns
@@ -378,7 +381,9 @@ impl Step for AgentStep {
                     .await;
                     retained = None;
                 }
-                None if sessions.as_ref().is_some_and(|s| s.lost(&thread)) => {
+                None if sessions.as_ref().is_some_and(|s| s.lost(&thread))
+                    || sessions::lost_on_resume(&ctx, &thread) =>
+                {
                     resolved = config.resolve(true);
                 }
                 _ => {}
@@ -465,7 +470,7 @@ impl Step for AgentStep {
         // The conversation outlives the node only through its export, taken
         // before the agent shuts down; a failed node discards it.
         if config.backend == AgentBackend::Api
-            && resolved.fidelity == Fidelity::Full
+            && retain_thread
             && let (Some(thread), Some(sessions)) = (&resolved.thread, &sessions)
         {
             match (&result, session.export()) {

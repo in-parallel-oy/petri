@@ -903,7 +903,11 @@ impl Runtime {
             self.run_config(),
         )?;
         let run = self.provision_run(self.options.run_dir.clone(), key, executor, router);
-        Ok((run.equip_standalone(self.sources.equip(driver)), info))
+        Ok((
+            run.equip_standalone(self.sources.equip(driver))
+                .with_capability(info.clone()),
+            info,
+        ))
     }
 
     fn run_config(&self) -> RunConfig {
@@ -1157,7 +1161,9 @@ impl RunRuntime {
             secrets,
             self.execution_config(execution_dir.into(), &context, sandbox),
         )?;
-        let driver = driver.with_capabilities(self.caps.clone());
+        let driver = driver
+            .with_capabilities(self.caps.clone())
+            .with_capability(info.clone());
         Ok((
             attach(
                 driver,

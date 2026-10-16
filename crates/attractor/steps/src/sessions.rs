@@ -16,8 +16,27 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Mutex, PoisonError};
 
 use pebble_coding_agent::CodingAgentExport;
+use runtime::driver::ResumeInfo;
+use runtime::engine::Event;
+use steps::StepCtx;
 
+use crate::agent::THREAD_EVENT;
 use crate::fallback::Plan;
+
+/// A resume loses the in-memory exports, including threads used by stages
+/// that already finished. Their thread events survive in the execution log.
+pub(crate) fn lost_on_resume(ctx: &StepCtx, thread: &str) -> bool {
+    ctx.capability::<ResumeInfo>().is_some_and(|resume| {
+        resume.log.events().any(|event| {
+            matches!(event, Event::StepProgressRecorded {
+                ev: ir::StepEvent::Custom(value), ..
+            } if value["kind"] == THREAD_EVENT
+                && value["backend"] == "api"
+                && value["thread"].as_str() == Some(thread)
+                && (value["fidelity"] == "full" || value["fidelity_source"] == "resume"))
+        })
+    })
+}
 
 /// One retained conversation.
 pub struct Retained {

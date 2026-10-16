@@ -595,6 +595,12 @@ sessions in an in-memory map per worker, so a resumed node runs from the
 `summary:high` preamble there too. Petri does not persist retained threads
 across `petri resume` for the same reason.
 
+Recovery identifies previously used threads from their recorded thread
+events, even when the interrupted stage was a command. The first successful
+agent on a lost thread retains its rebuilt conversation, so later agents on
+that thread return to `full` fidelity. A thread that was never used before
+the restart still starts fresh.
+
 The native backend retains a successful node's conversation per thread for
 the run (`attractor_steps::sessions::SessionService`, one per invocation). A
 later node at effective `full` on the same thread resumes it from Pebble's

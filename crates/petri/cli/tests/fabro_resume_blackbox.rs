@@ -16,6 +16,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use support::fabro::interview;
 use support::fabro::launch::{Case, Launch};
+use support::fabro::twins::{Provider, Twin, model, scenario, text};
 use tokio::time::{Instant, sleep};
 
 /// Three command nodes. `first` records each execution outside the
@@ -70,6 +71,122 @@ async fn wait_for(path: &Path) {
         );
         sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// A crash during a command must not make an already-used agent thread
+/// look new. Capture the actual provider requests in both processes.
+async fn shared_thread_across_command(restart: bool, second_thread: &str) {
+    let mut case = Case::new(if restart {
+        "thread-recovered"
+    } else {
+        "thread-control"
+    });
+    let provider = Provider::OpenAi;
+    let model = model(provider);
+    let scripts = [
+        ("first", "Remember the first answer", "QA_FIRST_CONTEXT"),
+        (
+            "second",
+            "Continue with the second answer",
+            "QA_SECOND_CONTEXT",
+        ),
+        (
+            "third",
+            "Continue with the third answer",
+            "QA_THIRD_CONTEXT",
+        ),
+    ]
+    .into_iter()
+    .map(|(id, prompt, answer)| {
+        scenario(provider, &case.credential, id, model, prompt, text(answer))
+    })
+    .collect();
+    let twin = Twin::start(provider, &case.root.join("twins"), scripts).await;
+    case.redirect(&twin);
+    let root = case.root.display();
+    let workflow = case.workflow(&format!(r#"digraph G {{
+    graph [backend="api"]
+    start [shape=Mdiamond]
+    exit [shape=Msquare]
+    first [prompt="Remember the first answer.", model="{model}", provider="openai", fidelity="full", thread_id="same"]
+    hold [shape=parallelogram, script="touch {root}/holding; while [ ! -f {root}/release ]; do sleep 0.1; done"]
+    second [prompt="Continue with the second answer.", model="{model}", provider="openai", fidelity="full", thread_id="{second_thread}"]
+    third [prompt="Continue with the third answer.", model="{model}", provider="openai", fidelity="full", thread_id="{second_thread}"]
+    start -> first -> hold -> second -> third -> exit
+}}"#), None);
+    let finished = if restart {
+        let killed = case
+            .run_with(&workflow, &["--quiet"], Launch {
+                kill_when: Some((case.root.join("holding"), Duration::from_millis(300))),
+                ..Launch::default()
+            })
+            .await;
+        assert!(!killed.timed_out, "{}", killed.stderr);
+        assert_eq!(killed.code, None, "{}", killed.stderr);
+        assert_eq!(twin.requests_for(&case.credential).len(), 1);
+        fs::write(case.root.join("release"), "go").expect("release command");
+        case.resume_with(&["--quiet"], Launch::default()).await
+    } else {
+        fs::write(case.root.join("release"), "go").expect("release command");
+        case.run(&workflow, &["--quiet"]).await
+    };
+    finished.assert_code(0);
+    let requests = twin.requests_for(&case.credential);
+    fs::write(
+        case.root.join("captured-requests.json"),
+        serde_json::to_vec_pretty(&requests).expect("requests"),
+    )
+    .expect("save requests");
+    assert_eq!(requests.len(), 3, "{requests:?}");
+    let second = requests[1]["input"].to_string();
+    assert_eq!(
+        second.contains("QA_FIRST_CONTEXT"),
+        second_thread == "same",
+        "second request; evidence: {}\n{second}",
+        case.root.display()
+    );
+    assert_eq!(
+        second.contains("## Stage: first"),
+        restart && second_thread == "same",
+        "only a recovered thread needs the summary: {second}"
+    );
+    let assistant_answers = |request: &Value| {
+        request["input"]
+            .as_array()
+            .expect("input messages")
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .map(Value::to_string)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    assert_eq!(
+        assistant_answers(&requests[1]).contains("QA_FIRST_CONTEXT"),
+        !restart && second_thread == "same",
+        "only the uninterrupted run has the original transcript"
+    );
+    assert!(
+        assistant_answers(&requests[2]).contains("QA_SECOND_CONTEXT"),
+        "the next node reuses the rebuilt conversation, rather than rebuilding another summary"
+    );
+    assert_eq!(twin.unmatched(), 0);
+    finished.assert_no_leaked_processes().await;
+    twin.stop();
+}
+
+#[tokio::test]
+async fn an_uninterrupted_thread_keeps_its_conversation_across_a_command() {
+    shared_thread_across_command(false, "same").await;
+}
+
+#[tokio::test]
+async fn a_thread_lost_during_a_command_resumes_with_the_prior_answer() {
+    shared_thread_across_command(true, "same").await;
+}
+
+#[tokio::test]
+async fn a_new_thread_after_resume_does_not_inherit_another_threads_summary() {
+    shared_thread_across_command(true, "other").await;
 }
 
 /// (a) A run killed once its first node's completion is durable resumes from

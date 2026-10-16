@@ -271,6 +271,9 @@ pub enum ResumeError {
 }
 
 /// What a host learns from [`Driver::resume`], before calling `run()`.
+/// The runtime also supplies this as an execution-local step capability so
+/// components can recover transient services from their recorded events.
+#[derive(Clone)]
 pub struct ResumeInfo {
     /// The firings whose step will actually execute again. Resume is invisible
     /// in the log, so this is where the host mints its own new execution
