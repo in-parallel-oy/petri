@@ -319,9 +319,10 @@ impl RoutingExecutor {
         }
         match &self.fixed {
             Some(source) => source.kind(),
-            None => match self.options.backend {
+            None => match &self.options.backend {
                 SandboxBackend::Host | SandboxBackend::Docker => CONTAINER_KIND,
                 SandboxBackend::Daytona => "daytona",
+                SandboxBackend::Named(kind) => kind.as_str(),
             },
         }
     }

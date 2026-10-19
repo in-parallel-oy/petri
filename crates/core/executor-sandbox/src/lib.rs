@@ -32,6 +32,7 @@ pub mod in_process;
 #[cfg(test)]
 mod in_process_tests;
 pub mod lease;
+mod named;
 pub mod plugin;
 #[cfg(test)]
 mod reconcile_tests;
@@ -338,6 +339,15 @@ impl SandboxExecutor {
                 .working_directory(format!("/{SIMULATED_KIND}/{}", scope.workspace_id));
             spec.labels.extend(labels.iter().cloned());
             return Ok(spec);
+        }
+        if let SandboxBackend::Named(kind) = &self.options.backend {
+            return named::build_plugin_spec(
+                scope,
+                labels,
+                name,
+                kind,
+                &self.options.provider_config,
+            );
         }
         if self.options.backend == SandboxBackend::Host
             && matches!(scope.runtime.target, RuntimeTarget::HostProcess)

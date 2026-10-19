@@ -7,12 +7,14 @@ use std::str::FromStr;
 
 use executor::EnvError;
 use ir::RuntimeSpec;
-use sandbox_driver::{NetworkPolicy, Resources, SandboxKind};
+use sandbox_driver::{NetworkPolicy, ProviderKind, Resources, SandboxKind};
+
+use crate::simulated::SIMULATED_KIND;
 
 const RUNNER_PIN: &str = "f8bbbfd81934";
 const DEFAULT_LABEL: &str = "ubuntu-24.04";
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub enum SandboxBackend {
     /// Local processes, with Docker for explicit container targets.
     #[default]
@@ -21,6 +23,10 @@ pub enum SandboxBackend {
     Docker,
     /// A Daytona sandbox, with a nested job container when requested.
     Daytona,
+    /// Any other provider kind, reached through the linked factory an
+    /// embedder registers under that name. Its sandboxes run the scope's
+    /// processes natively; see `build_plugin_spec`.
+    Named(ProviderKind),
 }
 
 impl fmt::Display for SandboxBackend {
@@ -29,6 +35,7 @@ impl fmt::Display for SandboxBackend {
             Self::Host => "host",
             Self::Docker => "docker",
             Self::Daytona => "daytona",
+            Self::Named(kind) => kind.as_str(),
         })
     }
 }
@@ -41,9 +48,17 @@ impl FromStr for SandboxBackend {
             "host" => Ok(Self::Host),
             "docker" => Ok(Self::Docker),
             "daytona" => Ok(Self::Daytona),
-            _ => Err(format!(
-                "unknown backend {value:?}; expected host, docker, or daytona"
+            "local" => Err(format!(
+                "unknown backend {value:?}; the local machine's backend is host"
             )),
+            SIMULATED_KIND => Err(format!(
+                "unknown backend {value:?}; a dry run simulates its sandboxes whatever the backend"
+            )),
+            kind => ProviderKind::try_new(kind).map(Self::Named).map_err(|_| {
+                format!(
+                    "unknown backend {value:?}; expected host, docker, daytona, or a provider kind"
+                )
+            }),
         }
     }
 }
@@ -81,6 +96,10 @@ pub struct SandboxOptions {
     pub daytona_kind:      DaytonaSandboxKind,
     /// `None` leaves development mode to the environment and build profile.
     pub plugin_dev:        Option<bool>,
+    /// Non-secret, provider-specific configuration a [`SandboxBackend::Named`]
+    /// provider's sandboxes are created with, forwarded unchanged as the
+    /// spec's `provider_config`. The built-in backends ignore it.
+    pub provider_config:   serde_json::Value,
 }
 
 /// The Daytona offering that hosts a workflow runner.

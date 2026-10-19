@@ -192,7 +192,8 @@ impl ModelArgs {
 
 #[derive(Args)]
 struct ProviderArgs {
-    /// Where workflow processes run: host, docker, or daytona. Defaults to
+    /// Where workflow processes run: host, docker, or daytona; any other
+    /// provider kind needs an embedder that links its provider. Defaults to
     /// what the workflow's own configuration asks for, else host.
     #[arg(long)]
     backend:            Option<SandboxBackend>,
