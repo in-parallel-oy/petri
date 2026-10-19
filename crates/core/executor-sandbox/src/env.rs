@@ -145,8 +145,9 @@ async fn report_output_loss(loss: OutputLoss, stderr: &Mutex<Option<DuplexStream
     }
 }
 
-/// What one streamed job runs: a step's exec, or an action's container.
-enum Job {
+/// What one streamed job runs: a step's exec, an action's container, or a
+/// run service's held exec ([`crate::services`]).
+pub(crate) enum Job {
     Exec(ExecSpec),
     OneShot(OneShotSpec),
 }
@@ -154,7 +155,7 @@ enum Job {
 /// Runs `job` in an owned task with the interface's line pumps on its
 /// output and the step's stop tokens on its controls. The task holds
 /// `admission` until the job settles, so the run's gate waits for it.
-fn spawn_streamed(
+pub(crate) fn spawn_streamed(
     sandbox: Arc<dyn Sandbox>,
     job: Job,
     stdin: bool,
@@ -491,7 +492,7 @@ impl ExecEnv for SandboxEnv {
 
 /// The process handle a step drives: its output, its stdin, its wait, and the
 /// two raw stop signals the step's ladder fires.
-struct SandboxProcess {
+pub(crate) struct SandboxProcess {
     lines:   Option<LineStream>,
     bytes:   Option<ByteStream>,
     stdin:   Option<StdinWriter>,
