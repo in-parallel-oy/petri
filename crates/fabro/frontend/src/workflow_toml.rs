@@ -29,15 +29,18 @@
 //!   the scope environment, with `{{ secrets.NAME }}` as a `$secret` reference
 //!   resolved at spawn; `resources` are the Daytona runner size. The other keys
 //!   Fabro's environment table accepts (`cwd`, `network`, `lifecycle`,
-//!   `labels`, `image.dockerfile`) are the Fabro platform's: known, read by
-//!   nothing here, and accepted silently in every layer, as `[workflow] engine`
-//!   is ([`ENVIRONMENT_KEYS`]). A warning is for a key the lowering reads but
-//!   cannot apply as Fabro does: an image on the `local` provider (which Fabro
-//!   ignores on the host) and `resources` off Daytona. A key neither Petri nor
-//!   Fabro's table knows warns as ignored. Both tables are read from every
-//!   settings layer and merged key by key, the host's settings layer under
-//!   `.fabro/project.toml` under `workflow.toml` ([`EnvironmentLayers`]), so a
-//!   bundle can name an environment the host's catalog declares.
+//!   `labels`, `provider_config`, `image.dockerfile`) are the Fabro platform's:
+//!   known, read by nothing here, and accepted silently in every layer, as
+//!   `[workflow] engine` is ([`ENVIRONMENT_KEYS`]). A warning is for a key the
+//!   lowering reads but cannot apply as Fabro does: an image on the `local`
+//!   provider (which Fabro ignores on the host) and `resources` off Daytona. A
+//!   key neither Petri nor Fabro's table knows warns as ignored. Both tables
+//!   are read from every settings layer and merged key by key, the host's
+//!   settings layer under `.fabro/project.toml` under `workflow.toml`
+//!   ([`EnvironmentLayers`]), so a bundle can name an environment the host's
+//!   catalog declares. Any other provider kind, such as `gcloud`, selects the
+//!   provider registered under that name, which runs the scope natively: an
+//!   image on it warns as ignored.
 //! - `[run.prepare]`: setup steps that run as command nodes between `start` and
 //!   its successors, in the selected environment, before any workflow node.
 //!   Each step gets the section's `timeout` (default five minutes) and
@@ -111,7 +114,7 @@ impl Settings {
                 "depth": self.run.clone.depth,
                 "repository": repository,
             },
-            "sandbox_backend": environment.map(Environment::sandbox_backend),
+            "sandbox_backend": environment.map(launch_backend),
             "cpu_cores": environment.and_then(|e| e.cpu_cores),
             "memory_mb": environment.and_then(|e| e.memory_mb),
             "disk_mb": environment.and_then(|e| e.disk_mb),
@@ -911,16 +914,17 @@ impl Reader<'_> {
             .and_then(toml::Value::as_str)
             .unwrap_or("")
             .to_string();
-        if !matches!(provider.as_str(), "local" | "docker" | "daytona") {
+        if !is_provider_kind(&provider) {
             let source = at(&format!("{base_table}.provider"));
             self.unsupported_in(
                 &source,
                 "workflow_toml.environments.provider",
                 format!(
                     "`[environments.{id}] provider = \"{provider}\"` in `{source}` is not \
-                     `local`, `docker` or `daytona`"
+                     `local`, `docker`, `daytona` or a sandbox provider kind"
                 ),
-                "set the provider to `local`, `docker` or `daytona`",
+                "set the provider to `local`, `docker`, `daytona`, or a provider plugin's kind \
+                 (lowercase letters, digits and interior hyphens)",
             );
             return;
         }
@@ -958,6 +962,16 @@ impl Reader<'_> {
                     "the `local` provider runs on the host; an image applies to `docker` and \
                      `daytona`",
                 );
+            } else if !matches!(provider.as_str(), "docker" | "daytona") {
+                // A named provider runs the scope natively, as the host does.
+                self.ignored_in(
+                    &at(&format!("{table}.image.docker")),
+                    &format!("environments.{id}.image"),
+                    &format!(
+                        "the `{provider}` provider runs the scope natively; an image applies to \
+                         `docker` and `daytona`"
+                    ),
+                );
             } else {
                 environment.image = Some(docker.to_string());
             }
@@ -973,11 +987,20 @@ impl Reader<'_> {
                 environment.memory_mb = resources.get("memory").and_then(size_mb);
                 environment.disk_mb = resources.get("disk").and_then(size_mb);
             } else {
+                let why = if matches!(provider.as_str(), "local" | "docker") {
+                    "resource limits apply to a Daytona runner; the host and Docker providers \
+                     run unconstrained"
+                        .to_owned()
+                } else {
+                    format!(
+                        "resource limits apply to a Daytona runner; the `{provider}` provider \
+                         sizes its sandboxes from its own configuration"
+                    )
+                };
                 self.ignored_in(
                     &at(&format!("{table}.resources")),
                     &format!("environments.{id}.resources"),
-                    "resource limits apply to a Daytona runner; the host and Docker providers \
-                     run unconstrained",
+                    &why,
                 );
             }
         }
@@ -1172,10 +1195,11 @@ const WORKFLOW_SECTION_KEYS: &[&str] = &["name", "description", "graph", "metada
 /// The `[environments.<id>]` keys Fabro's settings parser accepts
 /// (`EnvironmentLayer` in `fabro-config`). The lowering reads `provider`,
 /// `image.docker`, `resources` and `env`; `cwd`, `network`, `lifecycle`,
-/// `labels` and `image.dockerfile` are the Fabro platform's, which acts on
-/// them around the engine (the working directory, network policy, sandbox
-/// lifecycle and labels, the image build), so they are known here and read
-/// by nothing, as `[workflow] engine` is.
+/// `labels`, `provider_config` and `image.dockerfile` are the Fabro
+/// platform's, which acts on them around the engine (the working directory,
+/// network policy, sandbox lifecycle and labels, a named provider's
+/// configuration, the image build), so they are known here and read by
+/// nothing, as `[workflow] engine` is.
 const ENVIRONMENT_KEYS: &[&str] = &[
     "provider",
     "cwd",
@@ -1184,6 +1208,7 @@ const ENVIRONMENT_KEYS: &[&str] = &[
     "network",
     "lifecycle",
     "labels",
+    "provider_config",
     "env",
 ];
 
@@ -1197,6 +1222,7 @@ const RUN_ENVIRONMENT_KEYS: &[&str] = &[
     "network",
     "lifecycle",
     "labels",
+    "provider_config",
     "env",
 ];
 
@@ -1232,6 +1258,32 @@ const WORKFLOW_TOML_INERT: &[(&str, &str)] = &[
     ),
 ];
 
+/// The backend a launch names for `environment`: a named provider's own
+/// kind, which the attractor lowering would read as the host.
+fn launch_backend(environment: &Environment) -> &str {
+    match environment.provider.as_str() {
+        "local" | "docker" | "daytona" => environment.sandbox_backend(),
+        kind => kind,
+    }
+}
+
+/// Whether `provider` names an environment's sandbox provider: Fabro's
+/// `local`, or a sandbox-driver provider kind (lowercase ASCII letters,
+/// digits and interior hyphens, at most 64 bytes). `host` is Fabro's
+/// `local`, and `simulated` is a dry run's: neither is a name an environment
+/// uses.
+fn is_provider_kind(provider: &str) -> bool {
+    provider == "local"
+        || (!matches!(provider, "host" | "simulated")
+            && !provider.is_empty()
+            && provider.len() <= 64
+            && !provider.starts_with('-')
+            && !provider.ends_with('-')
+            && provider
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'))
+}
+
 /// `[run.*]` sections the standalone runner reads but does not act on, each
 /// with why.
 const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
@@ -1255,6 +1307,16 @@ const RUN_SECTIONS_IGNORED: &[(&str, &str)] = &[
     (
         "git",
         "the standalone runner performs no Git operations of its own",
+    ),
+    (
+        "pull_request_review",
+        "a Fabro host posts the run's review once the run ends; the standalone runner posts \
+         nothing",
+    ),
+    (
+        "services",
+        "a Fabro host keeps the run's services up in its sandboxes; the standalone runner \
+         starts none",
     ),
     (
         "integrations",
