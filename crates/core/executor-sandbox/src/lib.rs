@@ -38,6 +38,9 @@ pub mod plugin;
 mod reconcile_tests;
 mod routing;
 mod run;
+mod services;
+#[cfg(test)]
+mod services_tests;
 mod simulated;
 #[cfg(test)]
 mod simulated_tests;
@@ -79,6 +82,10 @@ pub use crate::plugin::{FixedProvider, PluginError, PluginSettings, PluginSource
 pub use crate::routing::{CONTAINER_KIND, RoutingExecutor};
 use crate::run::workspace_dir;
 pub use crate::run::{LEASE_LABEL, RUN_LABEL, RunIdentity, WORKSPACE_LABEL};
+use crate::services::expose_services;
+pub use crate::services::{
+    ReadyProbe, RunService, RunServices, SERVICES_DIR, SERVICES_DIR_VAR, ServiceReady, ServiceState,
+};
 pub use crate::simulated::{SIMULATED_KIND, SimulatedProvider};
 use crate::snapshots::{RunnerSnapshot, RunnerSnapshots};
 
@@ -135,7 +142,8 @@ impl SandboxExecutor {
         Self {
             manager: Arc::new(
                 SandboxLeaseManager::new(source, ledger, identity.clone())
-                    .with_lost_sandbox(options.lost_sandbox),
+                    .with_lost_sandbox(options.lost_sandbox)
+                    .with_services(options.services.clone()),
             ),
             identity,
             retention,
@@ -263,6 +271,29 @@ impl SandboxExecutor {
         let host = !self.simulated
             && self.options.backend == SandboxBackend::Host
             && matches!(scope.runtime.target, RuntimeTarget::HostProcess);
+        if let Some(services) = self.manager.services().filter(|_| !self.simulated) {
+            // The host's `/tmp` is every run's, and its PID namespace every
+            // lease's: a host lease keeps its services in its own directory.
+            let root = if host {
+                self.identity
+                    .run_dir()
+                    .join("services")
+                    .join(lease.raw().to_string())
+                    .to_string_lossy()
+                    .into_owned()
+            } else {
+                SERVICES_DIR.to_owned()
+            };
+            expose_services(&mut env_overrides, &ambient, &root);
+            services.attach(
+                lease,
+                scope.workspace_id.as_str(),
+                sandbox,
+                &workspace,
+                &env_overrides,
+                &self.gate,
+            );
+        }
         let env = SandboxEnv {
             host,
             sandbox: sandbox.clone(),

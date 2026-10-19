@@ -46,6 +46,7 @@ use tokio::task::JoinSet;
 
 use crate::plugin::ProviderSource;
 use crate::run::{LEASE_LABEL, RUN_LABEL, RunIdentity, WORKSPACE_LABEL};
+use crate::services::RunServices;
 use crate::{BACKEND, LostSandbox, acquire_failed};
 
 /// Where a lease's sandbox stands, durably.
@@ -266,6 +267,7 @@ pub struct SandboxLeaseManager {
     ledger:       Arc<dyn LeaseLedger>,
     identity:     Arc<RunIdentity>,
     lost_sandbox: LostSandbox,
+    services:     Option<Arc<RunServices>>,
     leases:       Mutex<HashMap<SandboxLeaseId, Arc<AsyncMutex<LeaseSlot>>>>,
     cleanup:      Mutex<JoinSet<()>>,
 }
@@ -281,6 +283,7 @@ impl SandboxLeaseManager {
             ledger,
             identity,
             lost_sandbox: LostSandbox::Refuse,
+            services: None,
             leases: Mutex::new(HashMap::new()),
             cleanup: Mutex::new(JoinSet::new()),
         }
@@ -294,8 +297,20 @@ impl SandboxLeaseManager {
         self
     }
 
+    /// The run's services, held in every sandbox this manager's leases
+    /// hold and stopped before the lease's sandbox is; `None` runs none.
+    #[must_use]
+    pub fn with_services(mut self, services: Option<Arc<RunServices>>) -> Self {
+        self.services = services;
+        self
+    }
+
     pub fn source(&self) -> &Arc<dyn ProviderSource> {
         &self.source
+    }
+
+    pub(crate) fn services(&self) -> Option<&Arc<RunServices>> {
+        self.services.as_ref()
     }
 
     fn slot(&self, lease: SandboxLeaseId) -> Arc<AsyncMutex<LeaseSlot>> {
@@ -411,6 +426,17 @@ impl SandboxLeaseManager {
                             "the lease's recorded sandbox is gone from the provider; creating a \
                              fresh one with an empty workspace"
                         );
+                        if self.services.is_some() {
+                            // Not a decision made here: nothing reruns the
+                            // run's prepare steps in the new sandbox.
+                            tracing::warn!(
+                                lease = request.lease.raw(),
+                                "the run's services will start in the fresh sandbox without the \
+                                 run's prepare steps having run there; one that needs them can \
+                                 crash until an agent prepares the workspace and runs \
+                                 `fabro-service start <name>`"
+                            );
+                        }
                         return self
                             .create(&provider, &request, &labels, build_spec, slot, generation)
                             .await;
@@ -730,6 +756,11 @@ impl SandboxLeaseManager {
         let report = ReleaseReport::default();
         let live = slot.live.take();
         slot.holders = 0;
+        // The services go first: their held execs must not outlive the
+        // sandbox they run in, nor meet it stopped.
+        if let Some(services) = &self.services {
+            services.detach(lease).await;
+        }
         let record = match self.ledger.lookup(lease).await {
             Ok(record) => record,
             Err(error) => return report.problem(error.to_string()),
@@ -871,6 +902,9 @@ impl SandboxLeaseManager {
         let mut slot = slot.lock().await;
         slot.live = None;
         slot.holders = 0;
+        if let Some(services) = &self.services {
+            services.detach(lease).await;
+        }
         let Some(record) = self
             .ledger
             .lookup(lease)

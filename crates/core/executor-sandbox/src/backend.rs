@@ -4,11 +4,13 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
 use executor::EnvError;
 use ir::RuntimeSpec;
 use sandbox_driver::{NetworkPolicy, ProviderKind, Resources, SandboxKind};
 
+use crate::services::RunServices;
 use crate::simulated::SIMULATED_KIND;
 
 const RUNNER_PIN: &str = "f8bbbfd81934";
@@ -100,6 +102,9 @@ pub struct SandboxOptions {
     /// provider's sandboxes are created with, forwarded unchanged as the
     /// spec's `provider_config`. The built-in backends ignore it.
     pub provider_config:   serde_json::Value,
+    /// The run's services, kept up in every sandbox the router's leases
+    /// hold once the host says they may start; `None` runs none.
+    pub services:          Option<Arc<RunServices>>,
 }
 
 /// The Daytona offering that hosts a workflow runner.
