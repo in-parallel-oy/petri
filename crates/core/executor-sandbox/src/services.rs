@@ -423,8 +423,9 @@ async fn hold(
     let mut respawn = RESPAWN_MIN;
     loop {
         let started = Instant::now();
-        // A run that has finished admits nothing more into its sandbox.
-        let Ok(admission) = gate.admit("service") else {
+        // A run that has finished admits nothing more into its sandbox; a
+        // held exec does not hold the run's close up (it never settles).
+        let Ok(admission) = gate.admit_unawaited("service") else {
             return;
         };
         let mut process = spawn_streamed(

@@ -29,6 +29,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Notify;
 use tokio::time::{Instant, sleep, timeout};
 
+use crate::gate::DRAIN_BUDGET;
 use crate::services::{CLI, SUPERVISOR, held_before_spec};
 use crate::{
     MemoryLedger, ProviderSource, ReadyProbe, RunIdentity, RunService, RunServices, SERVICES_DIR,
@@ -801,6 +802,29 @@ async fn a_supervisor_that_ends_is_spawned_again() {
     sleep(Duration::from_millis(100)).await;
     fixture.world.end.notify_waiters();
     eventually(5, "the respawned exec", || fixture.execs() == 2).await;
+    drop(handle);
+}
+
+#[tokio::test]
+async fn a_closed_gate_neither_waits_for_held_services_nor_respawns_them() {
+    let fixture = Fixture::new(None);
+    let executor = fixture.executor(&fixture.services);
+    let handle = executor
+        .acquire(&scope(), &managed())
+        .await
+        .expect("acquired");
+    fixture.services.scope_ready(WORKSPACE).await;
+    fixture.services.prepared().await;
+    eventually(5, "the held exec", || fixture.execs() == 1).await;
+
+    // A run closing without releasing its lease (interrupted, to resume)
+    // does not spend its drain budget on a held exec.
+    let closed = timeout(Duration::from_secs(2), executor.gate.close(DRAIN_BUDGET)).await;
+    assert_eq!(closed.ok(), Some(true), "the close waited for a held exec");
+    // And a supervisor that ends after the close is not spawned again.
+    fixture.world.end.notify_waiters();
+    sleep(Duration::from_millis(1500)).await;
+    assert_eq!(fixture.execs(), 1);
     drop(handle);
 }
 
