@@ -50,6 +50,24 @@ impl RunGate {
         Ok(Admission { _token: token })
     }
 
+    /// Admits work the gate refuses once closed but that closing does not
+    /// wait for: a run's held service execs. They have no reason to settle
+    /// on their own; lease release stops them, and a run that closes
+    /// without releasing its leases (interrupted, to be resumed) leaves them
+    /// to its retained sandbox rather than spending the drain budget on them.
+    pub(crate) fn admit_unawaited(&self, operation: &str) -> Result<Admission, EnvError> {
+        if self.admitted.is_closed() {
+            return Err(EnvError::backend(
+                BACKEND,
+                operation,
+                "the run has finished; its sandbox is no longer reachable",
+            ));
+        }
+        Ok(Admission {
+            _token: TaskTracker::new().token(),
+        })
+    }
+
     /// Stops new admissions and waits up to `budget` for admitted
     /// operations to settle. Returns `false` when some were still running
     /// at the deadline: they finish on their own, and no new one starts. A
@@ -97,6 +115,14 @@ mod tests {
         );
         drop(admitted);
         assert!(closing.await.expect("close task"));
+    }
+
+    #[tokio::test]
+    async fn closing_does_not_wait_for_unawaited_work_but_refuses_more() {
+        let gate = RunGate::default();
+        let _held = gate.admit_unawaited("service").expect("admitted");
+        assert!(gate.close(Duration::from_millis(10)).await);
+        assert!(gate.admit_unawaited("service").is_err());
     }
 
     #[tokio::test]
