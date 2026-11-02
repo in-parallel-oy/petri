@@ -682,8 +682,9 @@ impl Ctx<'_> {
         }
     }
 
-    /// Parse a `permissions` or `default_permissions` attribute, diagnosing
-    /// a bad level as an error. `None` when absent or bad.
+    /// Parse a `permissions` or `default_permissions` attribute: a bad level
+    /// is an error, and a good one warns that Fabro does not read it. `None`
+    /// when absent or bad.
     fn permissions_attr(
         &mut self,
         attrs: &Attrs,
@@ -691,30 +692,26 @@ impl Ctx<'_> {
         span: &Span,
     ) -> Option<crate::AgentPermissions> {
         let value = attrs.text(key)?;
-        match value.parse() {
-            Ok(level) => {
-                self.diags.warning(
-                    "attractor.petri_extension",
-                    attrs.span_of(key, span),
-                    format!(
-                        "`{key}` is a Petri extension: Fabro does not read it, so under Fabro \
-                         these agents keep full access"
-                    ),
-                );
-                Some(level)
-            }
-            Err(_) => {
-                self.diags.error(
-                    "attractor.permissions",
-                    attrs.span_of(key, span),
-                    format!(
-                        "`{key}` must be {}, not `{value}`",
-                        crate::AgentPermissions::expected()
-                    ),
-                );
-                None
-            }
-        }
+        let Ok(level) = value.parse() else {
+            self.diags.error(
+                "attractor.permissions",
+                attrs.span_of(key, span),
+                format!(
+                    "`{key}` must be {}, not `{value}`",
+                    crate::AgentPermissions::expected()
+                ),
+            );
+            return None;
+        };
+        self.diags.warning(
+            "attractor.petri_extension",
+            attrs.span_of(key, span),
+            format!(
+                "`{key}` is a Petri extension: Fabro does not read it, so under Fabro these \
+                 agents keep full access"
+            ),
+        );
+        Some(level)
     }
 
     // ── Structure ──────────────────────────────────────────────────────────
