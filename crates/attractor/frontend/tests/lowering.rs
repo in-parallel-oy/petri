@@ -2680,3 +2680,45 @@ fn invalid_permissions_and_restricted_acp_are_rejected() {
         "attractor.permissions_backend"
     ));
 }
+
+#[test]
+fn an_imported_workflow_keeps_its_default_permissions_below_the_import_site() {
+    let files = files(&[(
+        "flows/review.fabro",
+        r#"digraph Review {
+            graph [default_permissions="read-only"]
+            start [shape=Mdiamond]
+            exit [shape=Msquare]
+            read [prompt="review"]
+            edit [prompt="fix", permissions="read-write"]
+            start -> read -> edit -> exit
+        }"#,
+    )]);
+    let load = |text: &str| {
+        let lowered =
+            frontend_attractor::load("flows/main.fabro", text, &files, &CompileInputs::new());
+        lowered.graph.expect("lowers")
+    };
+    let graph = load(&dot(r#"r [import="review.fabro"] start -> r -> exit"#));
+    assert_eq!(
+        node(&graph, "r.read").step.config["permissions"],
+        "read-only"
+    );
+    assert_eq!(
+        node(&graph, "r.edit").step.config["permissions"],
+        "read-write"
+    );
+    let graph = load(&dot(
+        r#"r [import="review.fabro", permissions="full"] start -> r -> exit"#,
+    ));
+    assert_eq!(
+        node(&graph, "r.read").step.config["permissions"],
+        "full",
+        "the import site overrides the imported default"
+    );
+    assert_eq!(
+        node(&graph, "r.edit").step.config["permissions"],
+        "read-write",
+        "a node's own selection wins"
+    );
+}

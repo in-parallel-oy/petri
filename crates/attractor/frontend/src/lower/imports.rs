@@ -389,11 +389,19 @@ fn splice(
             }
         }
     } else {
+        // The imported workflow's other graph attributes stay behind, as
+        // Fabro's do; its agent permissions are a safety setting, so its
+        // `default_permissions` reaches its nodes, below the placeholder's.
+        let mut defaults = Attrs::default();
+        if let Some(attr) = imported.attrs.get("default_permissions") {
+            defaults.insert("permissions", attr.value.clone(), attr.span.clone());
+        }
+        defaults.overlay(&placeholder.defaults);
         for node in imported.nodes {
             if node.id == prepared.start || node.id == prepared.exit {
                 continue;
             }
-            let mut attrs = placeholder.defaults.clone();
+            let mut attrs = defaults.clone();
             attrs.overlay(&node.attrs);
             remap_retry_targets(&mut attrs, placeholder_id);
             relocate_file_references(&mut attrs, imported_dir, root_base_dir);

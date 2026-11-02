@@ -51,9 +51,14 @@ The key layers like `[run.model]`: the bundle's `workflow.toml` wins over
 `.fabro/project.toml`, which wins over the operator's `~/.fabro/settings.toml`.
 The order is node, graph, then run settings. With all three omitted, agents retain
 Petri's historical `full` access. Unknown values and wrong types are errors.
-A node's selection also applies
-to local agent hooks attached to that stage; run-level agent hooks use the workflow
-default. Deterministic scripts, command hooks, prompt-only model calls, and
+
+An imported workflow keeps its own `default_permissions` for the nodes it
+contributes, although its other graph attributes stay behind. The import site's
+`permissions` overrides that default, and a node's own `permissions` overrides
+both.
+
+A node's selection also applies to local agent hooks attached to that stage;
+run-level agent hooks use the workflow default. Deterministic scripts, command hooks, prompt-only model calls, and
 Petri's log/blob/report persistence are separate from agent tool execution.
 
 ACP agents are external processes whose tools Petri cannot reliably police.
