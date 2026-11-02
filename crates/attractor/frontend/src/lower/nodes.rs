@@ -176,7 +176,7 @@ impl Ctx<'_> {
                 (Some(StepRef::new(WAIT_KIND, config)), timeout)
             }
             Kind::ManagerLoop => {
-                let config = self.workflow_config(node, workflow, policy);
+                let config = self.workflow_config(node, workflow, policy, permissions);
                 (
                     Some(StepRef::new(WORKFLOW_KIND, config)),
                     explicit.unwrap_or(AGENT_TIMEOUT),

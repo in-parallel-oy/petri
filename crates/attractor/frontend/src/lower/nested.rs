@@ -20,6 +20,7 @@ impl Ctx<'_> {
         node: &NodeDecl,
         workflow: &Workflow,
         policy: FailurePolicy,
+        permissions: crate::AgentPermissions,
     ) -> Value {
         let mut config = Map::new();
         config.insert(
@@ -73,7 +74,7 @@ impl Ctx<'_> {
             (Some(path), _) => {
                 config.insert("child_workflow".into(), Value::String(path.clone()));
                 let span = node.attrs.span_of("stack.child_workflow", &node.span);
-                self.child_from_file(&path, &span, &node.id)
+                self.child_from_file(&path, &span, &node.id, permissions)
             }
             (None, Some(source)) => {
                 config.insert("child_dot_source".into(), Value::String(source.clone()));
@@ -83,7 +84,7 @@ impl Ctx<'_> {
                     self.stack.last().map_or("", String::as_str),
                     node.id
                 );
-                self.child_from_text(&name, &source, &span)
+                self.child_from_text(&name, &source, &span, permissions)
             }
             (None, None) => {
                 self.diags.error(
@@ -106,7 +107,13 @@ impl Ctx<'_> {
     /// Where a `stack.child_workflow` path reads from: as written against the
     /// repository root, with Fabro's bundle prefix `fabro/` standing for
     /// `.fabro/`, or beside the workflow file.
-    fn child_from_file(&mut self, path: &str, span: &Span, node: &str) -> Option<String> {
+    fn child_from_file(
+        &mut self,
+        path: &str,
+        span: &Span,
+        node: &str,
+        permissions: crate::AgentPermissions,
+    ) -> Option<String> {
         let mut candidates = vec![path.to_string()];
         if let Some(rest) = path.strip_prefix("fabro/") {
             candidates.push(format!(".fabro/{rest}"));
@@ -130,12 +137,21 @@ impl Ctx<'_> {
             );
             return None;
         };
-        self.child_from_text(&resolved, &text, span)
+        self.child_from_text(&resolved, &text, span, permissions)
     }
 
     /// Lower a child workflow now, so `petri check` validates it and the run
-    /// registers it before the root starts. Its digest names it.
-    fn child_from_text(&mut self, name: &str, text: &str, span: &Span) -> Option<String> {
+    /// registers it before the root starts. Its digest names it. The calling
+    /// node's agent permissions are the child's run default, as run settings
+    /// are a root workflow's: the child's own graph and nodes may override
+    /// them.
+    fn child_from_text(
+        &mut self,
+        name: &str,
+        text: &str,
+        span: &Span,
+        permissions: crate::AgentPermissions,
+    ) -> Option<String> {
         if self.stack.iter().any(|f| f == name) {
             self.diags.error(
                 "attractor.workflow_cycle",
@@ -181,7 +197,7 @@ impl Ctx<'_> {
             Diagnostics::new(),
             self.stack.clone(),
             RunSettings {
-                permissions: self.settings.permissions,
+                permissions,
                 model: self.settings.model.clone(),
                 model_override: self.settings.model_override.clone(),
                 mcps: self.settings.mcps.clone(),

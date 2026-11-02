@@ -2722,3 +2722,65 @@ fn an_imported_workflow_keeps_its_default_permissions_below_the_import_site() {
         "a node's own selection wins"
     );
 }
+
+#[test]
+fn a_nested_workflow_defaults_to_its_calling_node_permissions() {
+    let child = |graph_attrs: &str| {
+        format!(
+            "digraph C {{ {graph_attrs} start [shape=Mdiamond] exit [shape=Msquare] \
+             work [prompt=\\\"work\\\"] start -> work -> exit }}"
+        )
+    };
+    let lowered_child = |parent: &str| {
+        let lowered =
+            frontend_attractor::load("main.fabro", &dot(parent), &NoFiles, &CompileInputs::new());
+        assert!(
+            !lowered.diagnostics.has_errors(),
+            "{:?}",
+            lowered.diagnostics
+        );
+        let graph = lowered.graph.expect("lowers");
+        let digest = node(&graph, "m").step.config["child_digest"]
+            .as_str()
+            .expect("child digest")
+            .to_owned();
+        lowered
+            .children
+            .into_iter()
+            .find(|child| frontend::graph_digest(child) == digest)
+            .expect("registered child")
+    };
+    let manager = |attrs: &str, graph_attrs: &str| {
+        format!(
+            r#"graph [default_permissions="read-only"]
+            m [shape=house, stack.child_dot_source="{}"{attrs}]
+            start -> m -> exit"#,
+            child(graph_attrs)
+        )
+    };
+    let child_level = |attrs: &str, graph_attrs: &str| {
+        lowered_child(&manager(attrs, graph_attrs))
+            .nodes
+            .iter()
+            .find(|n| n.name == "work")
+            .expect("work")
+            .step
+            .config["permissions"]
+            .clone()
+    };
+    assert_eq!(
+        child_level("", ""),
+        "read-only",
+        "the parent graph's default"
+    );
+    assert_eq!(
+        child_level(r#", permissions="read-write""#, ""),
+        "read-write",
+        "the calling node's own level"
+    );
+    assert_eq!(
+        child_level("", r#"graph [default_permissions=\"full\"]"#),
+        "full",
+        "the child's graph default overrides, as over run settings"
+    );
+}
