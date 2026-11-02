@@ -1475,3 +1475,26 @@ async fn agent_hooks_obey_stage_permissions_and_host_ceiling() {
         }
     }
 }
+
+#[tokio::test]
+async fn stage_outputs_leave_out_agent_permissions() {
+    let dir = RunDir::new("permissions-output");
+    let (client, _) = scripted_client(vec![ScriptedCall::response(text_response("Done."))]);
+    let report = permission_runtime(&dir, client)
+        .run(graph(r#"permissions="read-only""#))
+        .await
+        .expect("run");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.history()
+    );
+    for stage in ["start", "exit"] {
+        let output = output_of(&report, stage);
+        assert!(
+            output.get("permissions").is_none() && output.get("default_permissions").is_none(),
+            "{stage}: {output}"
+        );
+    }
+}
