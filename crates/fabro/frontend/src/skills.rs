@@ -8,9 +8,6 @@ pub(crate) use frontend_attractor::SkillSettings;
 /// The `unsupported.*` feature of a malformed `skills` value.
 pub(crate) const UNSUPPORTED: &str = "workflow_toml.run.agent.skills";
 
-/// The warning that marks the key as a Petri extension.
-pub(crate) const EXTENSION_WARNING: &str = "fabro.petri_extension";
-
 /// Read the `skills` value of `[run.agent]`. A value that is not a list of
 /// non-empty strings is refused; a non-empty list warns that Fabro would
 /// refuse the key.
@@ -46,7 +43,7 @@ pub(crate) fn read(
     }
     if !dirs.is_empty() {
         diags.warning(
-            EXTENSION_WARNING,
+            crate::PETRI_EXTENSION,
             span.clone(),
             format!(
                 "`run.agent.skills` in `{path}` is a Petri extension: Fabro's `[run.agent]` \

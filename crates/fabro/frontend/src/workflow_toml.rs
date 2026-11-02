@@ -57,7 +57,7 @@ use toml::de::Error as TomlError;
 use crate::hooks::{PROJECT_FILE, SETTINGS_HOOKS_VAR};
 use crate::model_layers::LaunchModel;
 use crate::secrets::{InterpolationError, interpolate};
-use crate::skills;
+use crate::{agent_permissions, skills};
 
 /// The settings schema version this build reads, Fabro's `_version`.
 const WORKFLOW_TOML_VERSION: i64 = 1;
@@ -73,16 +73,19 @@ pub const ENVIRONMENT_PARAM: &str = "fabro.environment";
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     /// What the Attractor lowering applies.
-    pub run:          RunSettings,
+    pub run:               RunSettings,
     /// The launch's model choice and the host's default, as given; already
     /// folded into `run.model_override` and `run.model`.
-    pub launch:       LaunchModel,
+    pub launch:            LaunchModel,
     /// `[run.execution]`.
-    pub dry_run:      bool,
-    pub auto_approve: bool,
+    pub dry_run:           bool,
+    pub auto_approve:      bool,
     /// The file's path and text, for the hook and MCP loaders'
     /// `workflow.toml` layer.
-    pub hooks_text:   Option<(String, String)>,
+    pub hooks_text:        Option<(String, String)>,
+    /// `[run.agent] permissions` as this file sets it, before the lower
+    /// layers fill it into `run.permissions`.
+    pub agent_permissions: Option<frontend_attractor::AgentPermissions>,
 }
 
 impl Settings {
@@ -838,21 +841,8 @@ impl Reader<'_> {
             }
         }
         if let Some(value) = agent.get("permissions") {
-            if let Some(level) = value.as_str().and_then(|text| text.parse().ok()) {
-                self.settings.run.permissions = level;
-                self.warn(
-                    skills::EXTENSION_WARNING,
-                    "`run.agent.permissions` is a Petri extension; the reference Fabro settings \
-                     schema does not accept it"
-                        .to_owned(),
-                );
-            } else {
-                self.unsupported(
-                    "workflow_toml.run.agent.permissions",
-                    format!("invalid run.agent.permissions in `{}`", self.path),
-                    "use read-only, read-write, or full",
-                );
-            }
+            self.settings.agent_permissions =
+                agent_permissions::read(value, self.path, &self.span, self.diags);
         }
         if let Some(value) = agent.get("skills") {
             self.settings.run.skills = skills::read(value, self.path, &self.span, self.diags);

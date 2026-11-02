@@ -30,6 +30,14 @@ impl AgentPermissions {
             Self::Full => "full",
         }
     }
+
+    /// The accepted spellings, for a diagnostic: "read-only, read-write, or
+    /// full".
+    pub fn expected() -> String {
+        let (last, rest) = Self::ALL.split_last().expect("at least one level");
+        let rest: Vec<&str> = rest.iter().map(|level| level.as_str()).collect();
+        format!("{}, or {}", rest.join(", "), last.as_str())
+    }
 }
 
 impl fmt::Display for AgentPermissions {

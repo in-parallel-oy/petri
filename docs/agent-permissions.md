@@ -47,6 +47,8 @@ can supply a lower-priority default:
 permissions = "read-only"
 ```
 
+The key layers like `[run.model]`: the bundle's `workflow.toml` wins over
+`.fabro/project.toml`, which wins over the operator's `~/.fabro/settings.toml`.
 The order is node, graph, then run settings. With all three omitted, agents retain
 Petri's historical `full` access. Unknown values and wrong types are errors.
 A node's selection also applies
