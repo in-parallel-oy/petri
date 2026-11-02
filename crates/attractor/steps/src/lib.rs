@@ -31,7 +31,7 @@ pub mod human;
 mod outcome;
 pub mod parallel;
 pub mod pebble;
-pub mod permissions;
+mod permissions;
 pub use permissions::{AgentPermissionCeiling, AgentPermissions};
 pub mod prompt;
 pub mod route_usage;

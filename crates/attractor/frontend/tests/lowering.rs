@@ -2660,25 +2660,23 @@ fn invalid_permissions_and_restricted_acp_are_rejected() {
         "permissions=true",
         "permissions=1",
     ] {
-        assert!(
-            codes(&dot(&format!(
-                r#"a [prompt="work", {attr}] start -> a -> exit"#
-            )))
-            .contains(&"attractor.permissions".to_owned())
-        );
+        assert!(has_code(
+            &dot(&format!(r#"a [prompt="work", {attr}] start -> a -> exit"#)),
+            "attractor.permissions"
+        ));
     }
-    assert!(
-        codes(&dot(r#"
+    assert!(has_code(
+        &dot(r#"
         graph [default_permissions="invalid"]
         a [prompt="work", permissions="full"] start -> a -> exit
-    "#))
-        .contains(&"attractor.permissions".to_owned())
-    );
-    assert!(
-        codes(&dot(r#"
+    "#),
+        "attractor.permissions"
+    ));
+    assert!(has_code(
+        &dot(r#"
         graph [default_permissions="read-only", backend="acp"]
         a [prompt="work"] start -> a -> exit
-    "#))
-        .contains(&"attractor.permissions_backend".to_owned())
-    );
+    "#),
+        "attractor.permissions_backend"
+    ));
 }

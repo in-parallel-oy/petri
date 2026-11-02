@@ -18,9 +18,9 @@ use std::time::Duration;
 use std::{env, fs, process, thread};
 
 use attractor_steps::pebble::PebbleClient;
-use attractor_steps::register;
 use attractor_steps::skills::FabroHome;
 use attractor_steps::subagents::METRIC;
+use attractor_steps::{AgentPermissionCeiling, AgentPermissions, register};
 use execution::host::{self, HostRun};
 use execution::inspect::inspect_run_dir;
 use frontend::{CompileInputs, Diagnostics, Lowered, NoFiles};
@@ -1299,7 +1299,6 @@ async fn a_parent_still_delegates_after_its_own_compaction() {
 
 #[tokio::test]
 async fn subagent_permissions_never_exceed_the_parent() {
-    use attractor_steps::{AgentPermissionCeiling, AgentPermissions};
     for (attributes, ceiling) in [
         (r#"permissions="read-only""#, AgentPermissions::Full),
         (r#"permissions="full""#, AgentPermissions::ReadOnly),

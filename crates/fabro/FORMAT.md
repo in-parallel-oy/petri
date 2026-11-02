@@ -86,11 +86,8 @@ unmasked run records. See "ACP products" in the Attractor format.
 
 ## Agent permissions (Petri extension)
 
-`[run.agent] permissions = "read-only"` sets the default for native agent tools.
-The other values are `read-write` and `full`; omission preserves `full`. A graph's
-`default_permissions` overrides the run default and a node's `permissions`
-overrides the graph. The settings key emits `fabro.petri_extension`, since the
-reference Fabro settings schema does not accept it. Invalid values are errors.
-The host's `AgentPermissionCeiling` caps the effective access regardless of these
-settings. See [Agent permissions](../../docs/agent-permissions.md) for an example
-and enforcement details, including the restriction on shell commands.
+`[run.agent] permissions = "read-only"` sets the run's default agent tool
+access, below the graph's `default_permissions` and a node's `permissions`. The
+key emits `fabro.petri_extension`, since the reference Fabro settings schema does
+not accept it. See [Agent permissions](../../docs/agent-permissions.md) for the
+levels and enforcement details.

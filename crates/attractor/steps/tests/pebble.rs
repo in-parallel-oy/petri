@@ -8,8 +8,8 @@ use std::time::Duration;
 use attractor_steps::parallel::fenced_item;
 use attractor_steps::pebble::PebbleClient;
 use attractor_steps::pebble::environment::PebbleEnvironment;
-use attractor_steps::register;
 use attractor_steps::skills::FabroHome;
+use attractor_steps::{AgentPermissionCeiling, AgentPermissions, register};
 use frontend::Diagnostics;
 use frontend_attractor::RunSettings;
 use frontend_attractor::mcps::{DEFAULT_TOOL_TIMEOUT_MS, McpServer, McpTransport};
@@ -1259,7 +1259,6 @@ fn permission_runtime(dir: &RunDir, client: lithos_llm::Client) -> Runtime {
 
 #[tokio::test]
 async fn permissions_enforce_writes_and_shell_with_a_host_ceiling() {
-    use attractor_steps::{AgentPermissionCeiling, AgentPermissions};
     for (requested, ceiling, writes, shell) in [
         ("read-only", AgentPermissions::Full, false, false),
         ("read-write", AgentPermissions::Full, true, false),
@@ -1361,7 +1360,6 @@ async fn retained_conversation_rebinds_permissions_and_scripts_still_write() {
 
 #[tokio::test]
 async fn host_ceiling_refuses_acp_before_starting_a_process() {
-    use attractor_steps::{AgentPermissionCeiling, AgentPermissions};
     let dir = RunDir::new("permissions-acp");
     let (client, _) = scripted_client(Vec::new());
     let mut graph = graph("");
@@ -1379,16 +1377,21 @@ async fn host_ceiling_refuses_acp_before_starting_a_process() {
 
 #[tokio::test]
 async fn agent_hooks_obey_stage_permissions_and_host_ceiling() {
-    use attractor_steps::{AgentPermissionCeiling, AgentPermissions};
     use frontend_attractor::hooks::{HookDefinition, HookEvent, HookKind};
-    for (stage, ceiling, event) in [
-        ("read-only", AgentPermissions::Full, HookEvent::StageStart),
-        ("full", AgentPermissions::ReadOnly, HookEvent::StageStart),
-        ("read-only", AgentPermissions::Full, HookEvent::PreToolUse),
-        ("full", AgentPermissions::ReadOnly, HookEvent::PreToolUse),
-        ("read-only", AgentPermissions::Full, HookEvent::RunStart),
-        ("full", AgentPermissions::ReadOnly, HookEvent::RunStart),
-    ] {
+    let cases = [
+        ("read-only", AgentPermissions::Full),
+        ("full", AgentPermissions::ReadOnly),
+    ]
+    .into_iter()
+    .flat_map(|(stage, ceiling)| {
+        [
+            HookEvent::StageStart,
+            HookEvent::PreToolUse,
+            HookEvent::RunStart,
+        ]
+        .map(|event| (stage, ceiling, event))
+    });
+    for (stage, ceiling, event) in cases {
         let dir = RunDir::new("hook-permissions");
         let forbidden = dir.path().join("scopes/scope-0/work/hook-write.txt");
         let mut calls = vec![
@@ -1411,6 +1414,7 @@ async fn agent_hooks_obey_stage_permissions_and_host_ceiling() {
                 )),
             );
         }
+        let expected = calls.len();
         let (client, provider) = scripted_client(calls);
         let hook = HookDefinition {
             name: "review gate".into(),
@@ -1429,7 +1433,7 @@ async fn agent_hooks_obey_stage_permissions_and_host_ceiling() {
         };
         let source = format!(
             r#"digraph T {{ graph [default_model="test/model", default_permissions="{stage}"]
-            start [shape=Mdiamond] a [prompt="work", permissions="{stage}"]
+            start [shape=Mdiamond] a [prompt="work"]
             setup [shape=parallelogram, script="printf 'source for review' > source.txt"]
             exit [shape=Msquare] start -> setup -> a -> exit }}"#
         );
@@ -1460,11 +1464,7 @@ async fn agent_hooks_obey_stage_permissions_and_host_ceiling() {
         );
         assert!(!forbidden.exists());
         let requests = provider.requests();
-        assert_eq!(
-            requests.len(),
-            if is_tool { 4 } else { 3 },
-            "hook actually ran"
-        );
+        assert_eq!(requests.len(), expected, "hook actually ran");
         if is_tool {
             assert!(
                 serde_json::to_string(requests.last().expect("request"))

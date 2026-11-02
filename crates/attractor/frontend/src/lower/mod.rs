@@ -205,6 +205,9 @@ struct Ctx<'a> {
     /// The graph's ACP agent, the step's `acp` value, for `backend="acp"`
     /// nodes that name none. Diagnosed once, at the graph.
     graph_acp:        Option<Value>,
+    /// The agent permissions a node without its own `permissions` gets: the
+    /// graph's `default_permissions`, else the run settings'.
+    permissions:      crate::AgentPermissions,
 }
 
 /// Lower a semantic workflow. `file` is the name spans carry; `files` reads
@@ -268,6 +271,7 @@ fn lower_nested(
         children: Vec::new(),
         stack,
         lenient_unbound: inputs.unbound_is_warning,
+        permissions: settings.permissions,
         settings,
         workflow_name: workflow.name.clone(),
         repository,
@@ -600,14 +604,8 @@ impl Ctx<'_> {
         let attrs = workflow.attrs.clone();
         self.unknown_attrs(&attrs, attrs::GRAPH, attrs::GRAPH_IGNORED, "the graph");
         let span = workflow.span.clone();
-        if let Some(value) = attrs.text("default_permissions")
-            && serde_json::from_value::<crate::AgentPermissions>(Value::String(value)).is_err()
-        {
-            self.diags.error(
-                "attractor.permissions",
-                attrs.span_of("default_permissions", &span),
-                "default_permissions must be read-only, read-write, or full",
-            );
+        if let Some(permissions) = self.permissions_attr(&attrs, "default_permissions", &span) {
+            self.permissions = permissions;
         }
         // The run settings' goal (`[run] goal`, or the launch's) replaces the
         // graph's own, as Fabro's run materialization orders them; the
@@ -682,6 +680,26 @@ impl Ctx<'_> {
                 ),
             ),
         }
+    }
+
+    /// Parse a `permissions` or `default_permissions` attribute, diagnosing
+    /// a bad level as an error. `None` when absent or bad.
+    fn permissions_attr(
+        &mut self,
+        attrs: &Attrs,
+        key: &str,
+        span: &Span,
+    ) -> Option<crate::AgentPermissions> {
+        let value = attrs.text(key)?;
+        let parsed = value.parse().ok();
+        if parsed.is_none() {
+            self.diags.error(
+                "attractor.permissions",
+                attrs.span_of(key, span),
+                format!("`{key}` must be read-only, read-write, or full, not `{value}`"),
+            );
+        }
+        parsed
     }
 
     // ── Structure ──────────────────────────────────────────────────────────

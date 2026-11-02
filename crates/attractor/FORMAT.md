@@ -1609,12 +1609,8 @@ language's. Each keeps its name and behavior.
 
 ## Agent permissions (Petri extension)
 
-`graph [default_permissions="read-only"]` supplies an agent tool default;
-`permissions="read-write"` or `permissions="full"` selects a stage's access.
-Omission preserves full access. Invalid values are errors, and restricted ACP
-stages are rejected. Pebble enforces the effective level on each fresh or
-retained session and its subagents. The embedding host can cap access with
-`AgentPermissionCeiling`. Shell commands require `full`, including Git inspection
-commands. Deterministic workflow scripts retain their own access. See
-[Agent permissions](../../docs/agent-permissions.md) for precedence, hooks,
-embedding examples, and the tool categories.
+A node's `permissions` and the graph's `default_permissions` select an agent
+stage's tool access: `read-only`, `read-write`, or `full`. Omission preserves
+`full`. Shell commands, including Git inspection, require `full`. See
+[Agent permissions](../../docs/agent-permissions.md) for precedence, hooks, ACP,
+the host ceiling, and the tool categories.

@@ -838,15 +838,17 @@ impl Reader<'_> {
             }
         }
         if let Some(value) = agent.get("permissions") {
-            if let Ok(level) = value
-                .clone()
-                .try_into::<frontend_attractor::AgentPermissions>()
-            {
+            if let Some(level) = value.as_str().and_then(|text| text.parse().ok()) {
                 self.settings.run.permissions = level;
-                self.warn("fabro.petri_extension", "`run.agent.permissions` is a Petri extension; the reference Fabro settings schema does not accept it".to_owned());
+                self.warn(
+                    skills::EXTENSION_WARNING,
+                    "`run.agent.permissions` is a Petri extension; the reference Fabro settings \
+                     schema does not accept it"
+                        .to_owned(),
+                );
             } else {
                 self.unsupported(
-                    "workflow_toml.permissions",
+                    "workflow_toml.run.agent.permissions",
                     format!("invalid run.agent.permissions in `{}`", self.path),
                     "use read-only, read-write, or full",
                 );

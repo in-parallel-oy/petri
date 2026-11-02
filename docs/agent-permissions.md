@@ -49,9 +49,7 @@ permissions = "read-only"
 
 The order is node, graph, then run settings. With all three omitted, agents retain
 Petri's historical `full` access. Unknown values and wrong types are errors.
-`RunSettings.permissions` exposes the run default to frontends embedded in Rust.
-The native `attractor/agent` step configuration accepts the same `permissions`
-string, deserialized as `AgentConfig.permissions`. A node's selection also applies
+A node's selection also applies
 to local agent hooks attached to that stage; run-level agent hooks use the workflow
 default. Deterministic scripts, command hooks, prompt-only model calls, and
 Petri's log/blob/report persistence are separate from agent tool execution.

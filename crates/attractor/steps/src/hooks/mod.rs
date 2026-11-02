@@ -289,19 +289,20 @@ struct Configured {
 }
 
 struct Config {
-    hooks:    Vec<Configured>,
-    workflow: String,
+    hooks:               Vec<Configured>,
+    workflow:            String,
+    /// The access an agent hook outside any stage gets.
+    default_permissions: crate::AgentPermissions,
 }
 
 /// The local hook service.
 pub struct LocalHooks {
-    ceiling:     Mutex<crate::AgentPermissions>,
-    permissions: Mutex<crate::AgentPermissions>,
-    config:      Mutex<Option<Arc<Config>>>,
-    run:         Mutex<Option<RunInfo>>,
-    client:      Mutex<Option<PebbleClient>>,
-    envs:        ScopeEnvironments,
-    http:        executors::HttpClients,
+    ceiling: Mutex<crate::AgentPermissions>,
+    config:  Mutex<Option<Arc<Config>>>,
+    run:     Mutex<Option<RunInfo>>,
+    client:  Mutex<Option<PebbleClient>>,
+    envs:    ScopeEnvironments,
+    http:    executors::HttpClients,
 }
 
 tokio::task_local! {
@@ -326,7 +327,6 @@ impl LocalHooks {
     pub fn new(envs: ScopeEnvironments) -> Self {
         Self {
             ceiling: Mutex::new(crate::AgentPermissions::Full),
-            permissions: Mutex::new(crate::AgentPermissions::Full),
             config: Mutex::new(None),
             run: Mutex::new(None),
             client: Mutex::new(None),
@@ -359,7 +359,12 @@ impl LocalHooks {
 
     /// Install the run's hook list, once. Later calls with the same list are
     /// no-ops; a different list replaces it (a second run on one runtime).
-    pub fn configure(&self, hooks: &[HookDefinition], workflow: &str) {
+    pub fn configure(
+        &self,
+        hooks: &[HookDefinition],
+        workflow: &str,
+        default_permissions: crate::AgentPermissions,
+    ) {
         let configured = hooks
             .iter()
             .map(|definition| Configured {
@@ -371,13 +376,14 @@ impl LocalHooks {
             })
             .collect();
         *self.config.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(Config {
-            hooks:    configured,
+            hooks: configured,
             workflow: workflow.to_owned(),
+            default_permissions,
         }));
     }
 
-    /// Configure from a stage config that carries `hooks` and `workflow`,
-    /// when it does.
+    /// Configure from a stage config that carries `hooks`, `workflow` and
+    /// `default_permissions`, when it does.
     pub fn configure_from(&self, config: &Value) -> bool {
         let Some(list) = config.get("hooks") else {
             return false;
@@ -387,16 +393,9 @@ impl LocalHooks {
             .get("workflow")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        self.configure(&hooks, workflow);
-        *self
-            .permissions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = config
-            .get("default_permissions")
-            .or_else(|| config.get("permissions"))
-            .map_or(crate::AgentPermissions::Full, |value| {
-                serde_json::from_value(value.clone()).unwrap_or(crate::AgentPermissions::ReadOnly)
-            });
+        let default_permissions =
+            permissions_in(config.get("default_permissions")).unwrap_or_default();
+        self.configure(&hooks, workflow, default_permissions);
         true
     }
 
@@ -440,15 +439,23 @@ impl LocalHooks {
         )
     }
 
-    /// A context with the run's identity filled in.
+    /// A context with the run's identity and its agent hooks' access, capped
+    /// by the host ceiling, filled in.
     pub fn context(&self, event: HookEvent) -> Context {
         let (run_id, workflow_name) = self.run_info();
         let mut context = Context::new(event, run_id, workflow_name);
-        context.permissions = *self
-            .permissions
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let requested = self
+            .config()
+            .map_or(crate::AgentPermissions::Full, |config| {
+                config.default_permissions
+            });
+        context.permissions = self.capped(requested);
         context
+    }
+
+    /// `requested`, capped by the embedding host's ceiling.
+    fn capped(&self, requested: crate::AgentPermissions) -> crate::AgentPermissions {
+        requested.min(*self.ceiling.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Run every configured hook matching `context.event`, in order, with
@@ -460,11 +467,6 @@ impl LocalHooks {
         context: &Context,
         env: Option<Arc<dyn ExecEnv>>,
     ) -> (Decision, HookReport) {
-        let mut context = context.clone();
-        context.permissions = context
-            .permissions
-            .min(*self.ceiling.lock().unwrap_or_else(PoisonError::into_inner));
-        let context = &context;
         let mut report = HookReport::proceed(point);
         let Some(config) = self.config() else {
             return (Decision::Proceed, report);
@@ -671,15 +673,16 @@ fn edge_for_target(view: &FiringView, to: &str) -> Option<(u32, EdgeId)> {
 impl LocalHooks {
     fn stage_context(&self, event: HookEvent, view: &FiringView) -> Context {
         let mut context = self.context(event);
-        context.permissions = view
+        // A step-built view carries the stage's level on its config; a
+        // node's own view, on its meta.
+        let stage = view
             .config
             .as_ref()
             .and_then(|config| config.get("permissions"))
-            .or_else(|| view.node.step.config.get("permissions"))
-            .or_else(|| view.meta().get("permissions"))
-            .map_or(context.permissions, |value| {
-                serde_json::from_value(value.clone()).unwrap_or(crate::AgentPermissions::ReadOnly)
-            });
+            .or_else(|| view.meta().get("permissions"));
+        if let Some(requested) = permissions_in(stage) {
+            context.permissions = self.capped(requested);
+        }
         context.node_id = Some(view.node_name().to_owned());
         context.node_label = view
             .meta()
@@ -1072,6 +1075,17 @@ pub fn warning_event(
         "boundary": boundary,
         "message": message,
     }))
+}
+
+/// The permission level a config or meta value names. A value that is not a
+/// level fails closed to `read-only`.
+fn permissions_in(value: Option<&Value>) -> Option<crate::AgentPermissions> {
+    value.map(|value| {
+        value
+            .as_str()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(crate::AgentPermissions::ReadOnly)
+    })
 }
 
 /// A `FiringView` for a step that asks a point itself (the tool boundary,
