@@ -1581,3 +1581,57 @@ async fn parallel_hooks_use_the_parallel_nodes_permissions() {
         assert!(!forbidden.exists(), "{fork}, {ceiling:?}, {event:?}");
     }
 }
+
+/// Pebble refuses MCP tools below `full`, so a restricted stage never starts
+/// the run's MCP servers.
+#[tokio::test]
+async fn restricted_stages_start_no_mcp_server() {
+    for (level, starts) in [("read-only", false), ("read-write", false), ("full", true)] {
+        let dir = RunDir::new("permissions-mcp");
+        let marker = dir.path().join("mcp-started");
+        let (client, _) = scripted_client(vec![ScriptedCall::response(text_response("Done."))]);
+        let settings = RunSettings {
+            mcps: vec![McpServer {
+                name:               "probe".to_owned(),
+                transport:          McpTransport::Stdio {
+                    command: vec![
+                        "sh".to_owned(),
+                        "-c".to_owned(),
+                        format!("touch '{}'; sleep 5", marker.display()),
+                    ],
+                    env:     BTreeMap::new(),
+                },
+                startup_timeout_ms: 1_000,
+                tool_timeout_ms:    DEFAULT_TOOL_TIMEOUT_MS,
+                source:             "workflow.toml".to_owned(),
+            }],
+            ..RunSettings::default()
+        };
+        let source = format!(
+            r#"digraph T {{ graph [default_model="test/model"]
+            start [shape=Mdiamond] exit [shape=Msquare]
+            a [prompt="work", permissions="{level}"] start -> a -> exit }}"#
+        );
+        let graph = frontend_attractor::lower(
+            "test.fabro",
+            &source,
+            &NoFiles,
+            &CompileInputs::new(),
+            settings,
+            Diagnostics::new(),
+        )
+        .graph
+        .expect("graph");
+        let report = permission_runtime(&dir, client)
+            .run(graph)
+            .await
+            .expect("run");
+        assert_eq!(
+            report.status,
+            RunStatus::Success,
+            "{:?}",
+            report.state.history()
+        );
+        assert_eq!(marker.exists(), starts, "{level}");
+    }
+}

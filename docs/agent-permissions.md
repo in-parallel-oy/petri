@@ -30,7 +30,8 @@ execution. Petri installs no approval service that can raise these levels. Tool
 identity, rather than a display name or a workflow hook's decision, determines
 which level is required. Extensions and MCP tools require `full`, even when they
 advertise a read-like name. A host must trust the implementations of tools it
-registers, including their canonical identities.
+registers, including their canonical identities. Below `full`, Petri starts no
+MCP server and builds no host tool for the stage, since none could be called.
 
 Neither `read-only` nor `read-write` permits arbitrary shell commands. In
 particular, an agent cannot run `git log`, `git show`, or a test command at those

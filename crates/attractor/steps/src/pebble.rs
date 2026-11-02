@@ -241,11 +241,20 @@ impl NativeSession {
         };
         let hook_service = ctx.capability::<HookServiceHandle>();
         let compaction_policy = ctx.capability::<CompactionPolicyHandle>();
+        let level = permissions::effective(config.permissions, ctx);
+        // Pebble's permission policy refuses every MCP and host tool below
+        // `full`, so a restricted stage starts no MCP server and builds no
+        // host tool it could never call.
+        let full_access = level == crate::AgentPermissions::Full;
         // The host's own tools for this stage, built with the stage's
         // identity; Pebble registers them beside its tools, under the same
         // hooks and on the same event stream.
-        let host_tools = host_tools::for_node(ctx)
-            .map_err(|failure| AgentError::failed(failure.class.as_str(), failure.message))?;
+        let host_tools = if full_access {
+            host_tools::for_node(ctx)
+                .map_err(|failure| AgentError::failed(failure.class.as_str(), failure.message))?
+        } else {
+            Vec::new()
+        };
         // Which host tools a child may inherit, read before the builder
         // takes them: the tools event names them for each child session.
         let inheritable_hosts = tools::inheritable_host_tools(&host_tools);
@@ -293,7 +302,6 @@ impl NativeSession {
             .map_err(|e| AgentError::failed(SECRET_UNAVAILABLE_CLASS.as_str(), e))?;
         let shell_env = executor::layer_exec(env.clone(), Arc::new(InheritedEnv::new(inherited)));
         let provider = questions.clone();
-        let level = permissions::effective(config.permissions, ctx);
         let tool_hooks = hook_service.map(|handle| {
             let view = hooks::step_view(ctx, "agent", &config.label, &config.kv, level);
             let binding = hooks::ToolHookBinding::new(
@@ -305,7 +313,11 @@ impl NativeSession {
             );
             Arc::new(ToolHooks::new(binding, ctx.logs.clone()))
         });
-        let mcps = config.mcps.clone();
+        let mcps = if full_access {
+            config.mcps.clone()
+        } else {
+            Vec::new()
+        };
         let secrets = ctx.secrets.clone();
         let session_events = events.clone();
         let permissions = permissions::pebble(level);
