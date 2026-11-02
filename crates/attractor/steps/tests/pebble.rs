@@ -1498,3 +1498,86 @@ async fn stage_outputs_leave_out_agent_permissions() {
         );
     }
 }
+
+#[tokio::test]
+async fn parallel_hooks_use_the_parallel_nodes_permissions() {
+    use frontend_attractor::hooks::{HookDefinition, HookEvent, HookKind};
+    let cases = [
+        ("read-only", AgentPermissions::Full),
+        ("full", AgentPermissions::ReadOnly),
+    ]
+    .into_iter()
+    .flat_map(|(fork, ceiling)| {
+        [HookEvent::ParallelStart, HookEvent::ParallelComplete].map(|event| (fork, ceiling, event))
+    });
+    for (fork, ceiling, event) in cases {
+        let dir = RunDir::new("parallel-hook-permissions");
+        let forbidden = dir.path().join("scopes/scope-0/work/hook-write.txt");
+        let calls = vec![
+            ScriptedCall::response(tool_call_response(
+                "write_file",
+                "write",
+                json!({"file_path": "hook-write.txt", "content": "forbidden"}),
+            )),
+            ScriptedCall::response(text_response(r#"{"ok":true}"#)),
+        ];
+        let expected = calls.len();
+        let (client, provider) = scripted_client(calls);
+        let hook = HookDefinition {
+            name: "fork gate".into(),
+            id: None,
+            event,
+            kind: HookKind::Agent {
+                prompt:          "Review".into(),
+                model:           Some("test/model".into()),
+                max_tool_rounds: Some(3),
+            },
+            matcher: Some("^fork$".into()),
+            blocking: None,
+            timeout_ms: None,
+            sandbox: None,
+            source: None,
+        };
+        // The graph default is `full`: only the parallel node restricts.
+        let source = format!(
+            r#"digraph T {{ graph [default_model="test/model"]
+            start [shape=Mdiamond] exit [shape=Msquare]
+            fork [shape=component, permissions="{fork}"]
+            ok [shape=parallelogram, script="true"]
+            also [shape=parallelogram, script="true"]
+            merge [shape=tripleoctagon]
+            start -> fork fork -> ok fork -> also ok -> merge also -> merge merge -> exit }}"#
+        );
+        let settings = RunSettings {
+            hooks: vec![hook],
+            ..RunSettings::default()
+        };
+        let graph = frontend_attractor::lower(
+            "test.fabro",
+            &source,
+            &NoFiles,
+            &CompileInputs::new(),
+            settings,
+            Diagnostics::new(),
+        )
+        .graph
+        .expect("graph");
+        let report = permission_runtime(&dir, client)
+            .capability(AgentPermissionCeiling(ceiling))
+            .run(graph)
+            .await
+            .expect("run");
+        assert_eq!(
+            report.status,
+            RunStatus::Success,
+            "{event:?}: {:?}",
+            report.state.history()
+        );
+        assert_eq!(
+            provider.requests().len(),
+            expected,
+            "{event:?}: the hook actually ran"
+        );
+        assert!(!forbidden.exists(), "{fork}, {ceiling:?}, {event:?}");
+    }
+}

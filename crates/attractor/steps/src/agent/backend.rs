@@ -185,7 +185,13 @@ impl Session {
                     post.extend(service.configured_hooks(HookPoint::AfterToolFailure));
                     let binding = ToolHookBinding::new(
                         service.clone(),
-                        step_view(ctx, "agent", &config.label, &config.kv),
+                        step_view(
+                            ctx,
+                            "agent",
+                            &config.label,
+                            &config.kv,
+                            permissions::effective(config.permissions, ctx),
+                        ),
                         ctx.node.clone(),
                         ctx.firing,
                         ctx.attempt,

@@ -673,16 +673,7 @@ fn edge_for_target(view: &FiringView, to: &str) -> Option<(u32, EdgeId)> {
 impl LocalHooks {
     fn stage_context(&self, event: HookEvent, view: &FiringView) -> Context {
         let mut context = self.context(event);
-        // A step-built view carries the stage's level on its config; a
-        // node's own view, on its meta.
-        let stage = view
-            .config
-            .as_ref()
-            .and_then(|config| config.get("permissions"))
-            .or_else(|| view.meta().get("permissions"));
-        if let Some(requested) = permissions_in(stage) {
-            context.permissions = self.capped(requested);
-        }
+        self.stage_permissions(&mut context, view);
         context.node_id = Some(view.node_name().to_owned());
         context.node_label = view
             .meta()
@@ -691,6 +682,15 @@ impl LocalHooks {
             .map(str::to_owned);
         context.handler_type = handler_type(view);
         context
+    }
+
+    /// The stage's agent access, from its view's meta, capped by the host
+    /// ceiling: the lowered node's meta, or the level a step-built view
+    /// carries.
+    fn stage_permissions(&self, context: &mut Context, view: &FiringView) {
+        if let Some(requested) = permissions_in(view.meta().get("permissions")) {
+            context.permissions = self.capped(requested);
+        }
     }
 
     fn env_for(&self, view: &FiringView) -> Option<Arc<dyn ExecEnv>> {
@@ -744,6 +744,8 @@ impl LocalHooks {
             return HookReport::proceed(point);
         };
         let mut context = self.context(HookEvent::ParallelComplete);
+        // The fan-in step's view carries the parallel node's level.
+        self.stage_permissions(&mut context, view);
         context.node_id = Some(completed.fork.to_string());
         context.handler_type = Some("parallel".into());
         context.cwd = self
@@ -1090,9 +1092,17 @@ fn permissions_in(value: Option<&Value>) -> Option<crate::AgentPermissions> {
 
 /// A `FiringView` for a step that asks a point itself (the tool boundary,
 /// the start stage's points, a fork's): what the service reads from a view,
-/// built from the step's context. `kind` is the Fabro handler type.
-pub fn step_view(ctx: &steps::StepCtx, kind: &str, label: &str, kv: &Value) -> Arc<FiringView> {
-    view_of(ctx, kind, label, kv, None)
+/// built from the step's context. `kind` is the Fabro handler type;
+/// `permissions` is the stage's effective agent access, already capped by
+/// the host ceiling, for the agent hooks attached to it.
+pub fn step_view(
+    ctx: &steps::StepCtx,
+    kind: &str,
+    label: &str,
+    kv: &Value,
+    permissions: crate::AgentPermissions,
+) -> Arc<FiringView> {
+    view_of(ctx, kind, label, kv, None, permissions)
 }
 
 /// [`step_view`] with the step's resolved config on the view, for a step
@@ -1104,6 +1114,7 @@ pub fn view_of(
     label: &str,
     kv: &Value,
     config: Option<Value>,
+    permissions: crate::AgentPermissions,
 ) -> Arc<FiringView> {
     let node = ir::Node::new(
         ir::NodeId::new(0),
@@ -1111,7 +1122,7 @@ pub fn view_of(
         ctx.scope,
         ir::StepRef::new(kind, Value::Null),
     )
-    .with_meta(json!({ "kind": kind, "label": label }));
+    .with_meta(json!({ "kind": kind, "label": label, "permissions": permissions }));
     let mut context = ir::RunContext::new();
     if let Value::Object(map) = kv {
         context.merge(

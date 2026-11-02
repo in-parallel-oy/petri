@@ -59,8 +59,9 @@ both. A nested workflow that a manager loop runs takes the calling node's
 level as its run default, as a root workflow takes the run settings; the child's
 own `default_permissions` and node `permissions` override it.
 
-A node's selection also applies to local agent hooks attached to that stage;
-run-level agent hooks use the workflow default. Deterministic scripts, command hooks, prompt-only model calls, and
+A node's selection also applies to local agent hooks attached to that stage,
+including a parallel node's `parallel_start` and `parallel_complete` hooks and
+an agent's tool hooks; run-level agent hooks use the workflow default. Deterministic scripts, command hooks, prompt-only model calls, and
 Petri's log/blob/report persistence are separate from agent tool execution.
 
 ACP agents are external processes whose tools Petri cannot reliably police.

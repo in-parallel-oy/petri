@@ -242,6 +242,7 @@ async fn start_hooks(
         &config.label,
         &config.kv,
         Some(ctx.config.clone()),
+        crate::permissions::effective(config.permissions, ctx),
     );
     let mut points: Vec<(HookPoint, HookEvent, Value)> = Vec::new();
     if !config.hooks.is_null() {

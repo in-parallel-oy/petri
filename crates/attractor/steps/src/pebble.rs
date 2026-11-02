@@ -293,14 +293,9 @@ impl NativeSession {
             .map_err(|e| AgentError::failed(SECRET_UNAVAILABLE_CLASS.as_str(), e))?;
         let shell_env = executor::layer_exec(env.clone(), Arc::new(InheritedEnv::new(inherited)));
         let provider = questions.clone();
+        let level = permissions::effective(config.permissions, ctx);
         let tool_hooks = hook_service.map(|handle| {
-            let view = hooks::view_of(
-                ctx,
-                "agent",
-                &config.label,
-                &config.kv,
-                Some(json!({"permissions": config.permissions})),
-            );
+            let view = hooks::step_view(ctx, "agent", &config.label, &config.kv, level);
             let binding = hooks::ToolHookBinding::new(
                 handle.0.clone(),
                 view,
@@ -313,7 +308,7 @@ impl NativeSession {
         let mcps = config.mcps.clone();
         let secrets = ctx.secrets.clone();
         let session_events = events.clone();
-        let permissions = permissions::pebble(permissions::effective(config.permissions, ctx));
+        let permissions = permissions::pebble(level);
         let build = async {
             let environment = PebbleEnvironment::prepare(shell_env, cancel.clone(), kill.clone())
                 .await
