@@ -33,7 +33,7 @@ use steps::{Step, StepCtx};
 use crate::hooks::{BLOCKED_CLASS, record_report, view_of};
 use crate::outcome::Stage;
 use crate::pebble::PebbleClient;
-use crate::{checkout, fallback};
+use crate::{checkout, fallback, permissions};
 
 pub const KIND: StepKindId = STAGE_KIND;
 
@@ -242,7 +242,7 @@ async fn start_hooks(
         &config.label,
         &config.kv,
         Some(ctx.config.clone()),
-        crate::permissions::effective(config.permissions, ctx),
+        permissions::effective(config.permissions, ctx),
     );
     let mut points: Vec<(HookPoint, HookEvent, Value)> = Vec::new();
     if !config.hooks.is_null() {
