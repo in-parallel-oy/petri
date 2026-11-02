@@ -2784,3 +2784,40 @@ fn a_nested_workflow_defaults_to_its_calling_node_permissions() {
         "the child's graph default overrides, as over run settings"
     );
 }
+
+#[test]
+fn permission_attributes_warn_as_petri_extensions() {
+    let warned = |text: &str| {
+        diagnostics(&dot(text))
+            .into_iter()
+            .filter(|d| d.code == "attractor.petri_extension")
+            .count()
+    };
+    assert_eq!(warned(r#"a [prompt="work"] start -> a -> exit"#), 0);
+    assert_eq!(
+        warned(r#"a [prompt="work", permissions="read-only"] start -> a -> exit"#),
+        1
+    );
+    assert_eq!(
+        warned(
+            r#"graph [default_permissions="read-only"]
+            a [prompt="work", permissions="full"] start -> a -> exit"#
+        ),
+        2
+    );
+}
+
+#[test]
+fn an_invalid_level_on_an_acp_node_is_not_also_an_acp_error() {
+    let found = codes(&dot(
+        r#"a [prompt="work", backend="acp", permissions="readonly"] start -> a -> exit"#,
+    ));
+    assert!(
+        found.contains(&"attractor.permissions".to_owned()),
+        "{found:?}"
+    );
+    assert!(
+        !found.contains(&"attractor.permissions_backend".to_owned()),
+        "the misspelling is the one error: {found:?}"
+    );
+}

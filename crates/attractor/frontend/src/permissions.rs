@@ -48,7 +48,7 @@ impl fmt::Display for AgentPermissions {
 
 /// The text was not a permission level.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
-#[error("`{0}` is not a permission level (read-only, read-write, or full)")]
+#[error("`{0}` is not a permission level ({expected})", expected = AgentPermissions::expected())]
 pub struct UnknownPermissions(pub String);
 
 impl FromStr for AgentPermissions {
@@ -60,5 +60,34 @@ impl FromStr for AgentPermissions {
             .copied()
             .find(|level| level.as_str() == text)
             .ok_or_else(|| UnknownPermissions(text.to_owned()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A host ceiling caps with `min`, so the variants must stay ordered
+    /// from most to least restrictive.
+    #[test]
+    fn levels_order_from_most_to_least_restrictive() {
+        use AgentPermissions::{Full, ReadOnly, ReadWrite};
+        assert!(ReadOnly < ReadWrite && ReadWrite < Full);
+        assert_eq!(AgentPermissions::ALL, &[ReadOnly, ReadWrite, Full]);
+        assert_eq!(Full.min(ReadOnly), ReadOnly);
+    }
+
+    #[test]
+    fn levels_parse_and_print_their_spellings() {
+        for level in AgentPermissions::ALL {
+            assert_eq!(level.as_str().parse::<AgentPermissions>(), Ok(*level));
+        }
+        assert_eq!(
+            "readonly"
+                .parse::<AgentPermissions>()
+                .unwrap_err()
+                .to_string(),
+            "`readonly` is not a permission level (read-only, read-write, or full)"
+        );
     }
 }

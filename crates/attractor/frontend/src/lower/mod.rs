@@ -691,15 +691,30 @@ impl Ctx<'_> {
         span: &Span,
     ) -> Option<crate::AgentPermissions> {
         let value = attrs.text(key)?;
-        let parsed = value.parse().ok();
-        if parsed.is_none() {
-            self.diags.error(
-                "attractor.permissions",
-                attrs.span_of(key, span),
-                format!("`{key}` must be read-only, read-write, or full, not `{value}`"),
-            );
+        match value.parse() {
+            Ok(level) => {
+                self.diags.warning(
+                    "attractor.petri_extension",
+                    attrs.span_of(key, span),
+                    format!(
+                        "`{key}` is a Petri extension: Fabro does not read it, so under Fabro \
+                         these agents keep full access"
+                    ),
+                );
+                Some(level)
+            }
+            Err(_) => {
+                self.diags.error(
+                    "attractor.permissions",
+                    attrs.span_of(key, span),
+                    format!(
+                        "`{key}` must be {}, not `{value}`",
+                        crate::AgentPermissions::expected()
+                    ),
+                );
+                None
+            }
         }
-        parsed
     }
 
     // ── Structure ──────────────────────────────────────────────────────────
