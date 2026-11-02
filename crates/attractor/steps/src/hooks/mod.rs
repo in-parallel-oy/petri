@@ -151,9 +151,18 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(event: HookEvent, run_id: String, workflow_name: String) -> Self {
+    /// A context for `event`. `permissions` is the access an agent hook run
+    /// with this context gets, already capped by the host ceiling: there is
+    /// no default, so no context reaches an agent hook with access nobody
+    /// chose.
+    pub fn new(
+        event: HookEvent,
+        run_id: String,
+        workflow_name: String,
+        permissions: crate::AgentPermissions,
+    ) -> Self {
         Self {
-            permissions: crate::AgentPermissions::Full,
+            permissions,
             event,
             run_id,
             workflow_name,
@@ -443,14 +452,12 @@ impl LocalHooks {
     /// by the host ceiling, filled in.
     pub fn context(&self, event: HookEvent) -> Context {
         let (run_id, workflow_name) = self.run_info();
-        let mut context = Context::new(event, run_id, workflow_name);
         let requested = self
             .config()
             .map_or(crate::AgentPermissions::Full, |config| {
                 config.default_permissions
             });
-        context.permissions = self.capped(requested);
-        context
+        Context::new(event, run_id, workflow_name, self.capped(requested))
     }
 
     /// `requested`, capped by the embedding host's ceiling.
@@ -1183,6 +1190,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_level_contexts_take_the_workflow_default_capped_by_the_ceiling() {
+        use crate::AgentPermissions::{Full, ReadOnly, ReadWrite};
+        let hooks = LocalHooks::default();
+        assert_eq!(hooks.context(HookEvent::RunStart).permissions, Full);
+        hooks.configure(&[], "w", ReadWrite);
+        assert_eq!(hooks.context(HookEvent::RunStart).permissions, ReadWrite);
+        hooks.set_permission_ceiling(ReadOnly);
+        assert_eq!(hooks.context(HookEvent::RunStart).permissions, ReadOnly);
+    }
+
+    #[test]
     fn decisions_merge_as_fabro_merges_them() {
         let block = Decision::Block { reason: None };
         let skip = Decision::Skip { reason: None };
@@ -1222,14 +1240,24 @@ mod tests {
             },
             matcher:    pattern.and_then(|p| regex::Regex::new(p).ok()),
         };
-        let mut context = Context::new(HookEvent::StageStart, String::new(), String::new());
+        let mut context = Context::new(
+            HookEvent::StageStart,
+            String::new(),
+            String::new(),
+            crate::AgentPermissions::ReadOnly,
+        );
         context.node_id = Some("implement_step".into());
         context.handler_type = Some("agent".into());
         assert!(matches(&hook(None), &context));
         assert!(matches(&hook(Some("implement")), &context));
         assert!(matches(&hook(Some("^agent$")), &context));
         assert!(!matches(&hook(Some("^implement$")), &context));
-        let bare = Context::new(HookEvent::StageStart, String::new(), String::new());
+        let bare = Context::new(
+            HookEvent::StageStart,
+            String::new(),
+            String::new(),
+            crate::AgentPermissions::ReadOnly,
+        );
         assert!(!matches(&hook(Some("agent")), &bare), "no field, no match");
         assert!(matches(&hook(None), &bare));
     }
