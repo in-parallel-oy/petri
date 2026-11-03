@@ -509,6 +509,12 @@ impl Step for AgentStep {
             Err(AgentError::Failed { class, message }) => fail(message, &class),
             Err(AgentError::Model(failure)) => fail(failure.to_string(), &failure.class()),
         };
+        // Keep successful writes even when a later response or shutdown fails.
+        // The final outcome is what replay and the next stage's preamble read.
+        let files = session.take_files_touched();
+        if !files.is_empty() {
+            outcome.output["files_touched"] = json!(files);
+        }
         let custom = session.metrics(turns);
         outcome.metrics = Metrics {
             duration_ms: Some(u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)),

@@ -163,6 +163,7 @@ struct Completed<'a> {
     output:   Option<String>,
     model:    Option<String>,
     text:     Option<String>,
+    files:    Option<String>,
     /// The context keys this stage's output already rendered.
     rendered: Vec<String>,
 }
@@ -427,6 +428,14 @@ fn completed_stage<'a>(
         output: stdout,
         model: if is_llm { model } else { None },
         text: if is_llm { text } else { None },
+        files: output
+            .get("files_touched")
+            .and_then(Value::as_array)
+            .and_then(|paths| {
+                let paths: Vec<&str> = paths.iter().filter_map(Value::as_str).collect();
+                // JSON keeps line breaks, quotes and delimiters in paths unambiguous.
+                (!paths.is_empty()).then(|| render_value(&serde_json::json!(paths)))
+            }),
         rendered,
     })
 }
@@ -456,6 +465,10 @@ impl Completed<'_> {
             .model
             .as_deref()
             .map(|model| format!("{indent}- Model: {model}"));
+        let files = self
+            .files
+            .as_deref()
+            .map(|files| format!("{indent}- Files: {files}"));
         let mut parts = Vec::new();
         match detail {
             Detail::Compact => match self.kind {
@@ -463,7 +476,10 @@ impl Completed<'_> {
                     parts.extend(script);
                     parts.extend(self.output_block(COMPACT_OUTPUT_MAX_LINES, indent));
                 }
-                Some("agent" | "prompt") => parts.extend(model),
+                Some("agent" | "prompt") => {
+                    parts.extend(model);
+                    parts.extend(files);
+                }
                 _ => {}
             },
             Detail::Low => {
@@ -476,6 +492,7 @@ impl Completed<'_> {
                 parts.extend(script);
                 parts.extend(self.output_block(SUMMARY_HIGH_OUTPUT_MAX_LINES, indent));
                 parts.extend(model);
+                parts.extend(files);
                 if let Some(text) = &self.text {
                     parts.push(format!("{indent}- Response:"));
                     parts.extend(
@@ -674,6 +691,47 @@ mod tests {
         assert!(
             p.prompt(Fidelity::Compact, "Do it.")
                 .ends_with("\n\n\nDo it.")
+        );
+    }
+
+    #[test]
+    fn tracked_files_follow_fidelity_and_value_bounds() {
+        let stages = vec![stage("edit", "agent", None)];
+        let paths = json!(["normal.txt", "odd\n\"name.txt"]);
+        let mut nodes = json!({"edit": {"status":"success", "output":{"files_touched":paths}}});
+        let kv = json!({});
+        let p = preamble(&nodes, &kv, &stages);
+        for mode in [
+            Fidelity::Compact,
+            Fidelity::SummaryMedium,
+            Fidelity::SummaryHigh,
+        ] {
+            let text = p.render(mode);
+            assert!(text.contains(&format!("Files: {paths}")), "{text}");
+            assert!(
+                !text.contains("odd\n"),
+                "a filename must not inject a new line"
+            );
+        }
+        for mode in [Fidelity::Full, Fidelity::Truncate, Fidelity::SummaryLow] {
+            assert!(!p.render(mode).contains("Files:"));
+        }
+        for absent in [Value::Null, json!([]), json!(42), json!([null, 7])] {
+            nodes["edit"]["output"]["files_touched"] = absent;
+            assert!(
+                !preamble(&nodes, &kv, &stages)
+                    .render(Fidelity::Compact)
+                    .contains("Files:")
+            );
+        }
+        let large = json!(["x".repeat(INLINE_VALUE_MAX + 1)]);
+        nodes["edit"]["output"]["files_touched"] = large.clone();
+        let text = preamble(&nodes, &kv, &stages).render(Fidelity::Compact);
+        assert!(text.contains("too large to inline"), "{text}");
+        assert!(text.len() < INLINE_VALUE_MAX);
+        assert_eq!(
+            nodes["edit"]["output"]["files_touched"], large,
+            "rendering preserves durable paths"
         );
     }
 

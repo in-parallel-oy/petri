@@ -277,6 +277,15 @@ impl Session {
             Self::Pebble(session) => Some(session.export()),
         }
     }
+    /// ACP does not report tracked native writes. An empty list is absence,
+    /// not a claim that a stage made no filesystem changes.
+    pub(crate) fn take_files_touched(&mut self) -> Vec<String> {
+        match self {
+            Self::Acp(_) => Vec::new(),
+            Self::Pebble(session) => session.take_files_touched(),
+        }
+    }
+
     pub(crate) fn metrics(&self, turns: u64) -> BTreeMap<SmolStr, Value> {
         match self {
             Self::Acp(client) => client.metrics(turns),
