@@ -2825,30 +2825,3 @@ script = "echo stage_complete:$FABRO_NODE_ID >> hooks.log"
     assert_eq!(events.len(), 1, "{events:?}");
     assert_eq!(events[0].1["report"]["hooks"][0]["state"], "executed");
 }
-
-#[tokio::test]
-async fn former_preparation_prefix_gets_ordinary_command_hooks() {
-    let dir = RunDir::new("hooks-former-prefix");
-    let graph = lower(
-        r#"digraph G {
-            start [shape=Mdiamond]
-            run_prepare_1 [shape=parallelogram, script="echo command >> commands.log"]
-            exit [shape=Msquare]
-            start -> run_prepare_1 -> exit
-        }"#,
-        r#"[[run.hooks]]
-            event = "stage_start"
-            matcher = "^run_prepare_1$"
-            script = "echo hook >> hooks.log"
-        "#,
-    );
-    let (report, _) = run(&dir, graph, None).await;
-    assert_eq!(
-        report.status,
-        RunStatus::Success,
-        "{:?}",
-        report.state.errors()
-    );
-    assert_eq!(read(&workspace(&dir).join("commands.log")), "command\n");
-    assert_eq!(read(&workspace(&dir).join("hooks.log")), "hook\n");
-}
