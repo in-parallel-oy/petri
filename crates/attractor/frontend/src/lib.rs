@@ -43,6 +43,8 @@ mod lower;
 pub use lower::fallbacks;
 pub mod mcps;
 pub mod model;
+mod permissions;
+pub use permissions::{AgentPermissions, UnknownPermissions};
 pub mod stylesheet;
 pub mod template;
 

@@ -253,7 +253,19 @@ impl Ctx<'_> {
         if !inline.is_empty() {
             config.insert("inline".into(), json!(inline));
         }
+        config.insert("permissions".into(), self.fork_permissions(fork));
         self.b.node_mut(fork.id).step = StepRef::new(FORK_KIND, Value::Object(config));
+    }
+
+    /// The parallel node's agent permissions, as its node lowering resolved
+    /// them, for the agent hooks its fork and join steps ask.
+    fn fork_permissions(&self, fork: &Fork) -> Value {
+        self.b
+            .graph()
+            .node(fork.id)
+            .and_then(|node| node.meta.get("permissions"))
+            .cloned()
+            .unwrap_or_else(|| json!(self.permissions))
     }
 
     /// Fabro's `max_parallel`: missing, non-integer or negative is 4; zero
@@ -371,8 +383,10 @@ impl Ctx<'_> {
         let join_id = self.nodes.get(&join).map(|n| n.id)?;
         if self.nodes.get(&join).map(|n| n.kind) == Some(Kind::FanIn) {
             // The join reports `parallel_complete` for this fork.
+            let permissions = self.fork_permissions(fork);
             if let Value::Object(config) = &mut self.b.node_mut(join_id).step.config {
                 config.insert("fork".into(), Value::String(fork.decl.id.clone()));
+                config.insert("fork_permissions".into(), permissions);
             }
             return Some((join_id, join));
         }
@@ -384,6 +398,7 @@ impl Ctx<'_> {
         let name = format!("{}.fan_in", fork.decl.id);
         let results = placeholder(self.ordered_results());
         let occurrences = placeholder(self.ordered_field(FORK_OCCURRENCE_FIELD));
+        let fork_permissions = self.fork_permissions(fork);
         let collector = self.b.add_node(
             &name,
             self.scope,
@@ -393,6 +408,7 @@ impl Ctx<'_> {
                     "label": format!("Fan-in of {}", fork.decl.id),
                     "node": name,
                     "fork": fork.decl.id,
+                    "fork_permissions": fork_permissions,
                     "results": results,
                     "occurrences": occurrences,
                 }),

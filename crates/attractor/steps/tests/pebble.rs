@@ -8,8 +8,8 @@ use std::time::Duration;
 use attractor_steps::parallel::fenced_item;
 use attractor_steps::pebble::PebbleClient;
 use attractor_steps::pebble::environment::PebbleEnvironment;
-use attractor_steps::register;
 use attractor_steps::skills::FabroHome;
+use attractor_steps::{AgentPermissionCeiling, AgentPermissions, register};
 use frontend::Diagnostics;
 use frontend_attractor::RunSettings;
 use frontend_attractor::mcps::{DEFAULT_TOOL_TIMEOUT_MS, McpServer, McpTransport};
@@ -1247,5 +1247,391 @@ async fn default_and_explicit_native_agents_reject_a_response_after_the_deadline
             "the delayed call did not finish"
         );
         assert_eq!(metrics(&report)["pebble.usage"]["tokens"]["input"], 0);
+    }
+}
+
+fn permission_runtime(dir: &RunDir, client: lithos_llm::Client) -> Runtime {
+    let runtime = runtime(dir, client);
+    let mut options = runtime.run_options().clone();
+    options.retention = Retention::Always;
+    runtime.options(options)
+}
+
+#[tokio::test]
+async fn permissions_enforce_writes_and_shell_with_a_host_ceiling() {
+    for (requested, ceiling, writes, shell) in [
+        ("read-only", AgentPermissions::Full, false, false),
+        ("read-write", AgentPermissions::Full, true, false),
+        ("full", AgentPermissions::Full, true, true),
+        ("full", AgentPermissions::ReadOnly, false, false),
+        ("full", AgentPermissions::ReadWrite, true, false),
+    ] {
+        let dir = RunDir::new("permissions");
+        let written = dir.path().join("scopes/scope-0/work/agent-write.txt");
+        let shelled = dir.path().join("scopes/scope-0/work/agent-shell.txt");
+        let (client, provider) = scripted_client(vec![
+            ScriptedCall::response(tool_call_response(
+                "write_file",
+                "write",
+                json!({"file_path": "agent-write.txt", "content": "written"}),
+            )),
+            ScriptedCall::response(tool_call_response(
+                "shell",
+                "shell",
+                json!({"command": format!("touch '{}'", shelled.display())}),
+            )),
+            ScriptedCall::response(text_response("Done.")),
+        ]);
+        let report = permission_runtime(&dir, client)
+            .capability(AgentPermissionCeiling(ceiling))
+            .run(graph(&format!("permissions=\"{requested}\"")))
+            .await
+            .expect("run");
+        assert_eq!(
+            report.status,
+            RunStatus::Success,
+            "{:?}",
+            report.state.history()
+        );
+        assert_eq!(written.exists(), writes, "{requested}, {ceiling:?}");
+        assert_eq!(shelled.exists(), shell, "{requested}, {ceiling:?}");
+        assert_eq!(provider.requests().len(), 3);
+    }
+}
+
+#[tokio::test]
+async fn retained_conversation_rebinds_permissions_and_scripts_still_write() {
+    let dir = RunDir::new("permissions-resume");
+    let written = dir.path().join("scopes/scope-0/work/first-stage.txt");
+    let forbidden = dir.path().join("scopes/scope-0/work/second-stage.txt");
+    let report_file = dir.path().join("scopes/scope-0/work/report.txt");
+    let (client, provider) = scripted_client(vec![
+        ScriptedCall::response(tool_call_response(
+            "write_file",
+            "write-first",
+            json!({"file_path": "first-stage.txt", "content": "first"}),
+        )),
+        ScriptedCall::response(text_response("First stage remembered.")),
+        ScriptedCall::response(tool_call_response(
+            "write_file",
+            "write-second",
+            json!({"file_path": "second-stage.txt", "content": "forbidden"}),
+        )),
+        ScriptedCall::response(text_response("Reviewed.")),
+    ]);
+    let source = format!(
+        r#"digraph T {{
+        graph [default_model="test/model"]
+        start [shape=Mdiamond]
+        a [prompt="write", fidelity="full", thread_id="shared", permissions="full"]
+        b [prompt="review", fidelity="full", thread_id="shared", permissions="read-only"]
+        report [shape=parallelogram, script="touch '{}'" ]
+        exit [shape=Msquare]
+        start -> a -> b -> report -> exit
+    }}"#,
+        report_file.display()
+    );
+    let graph = frontend_attractor::load("test.fabro", &source, &NoFiles, &CompileInputs::new())
+        .graph
+        .expect("graph");
+    let report = permission_runtime(&dir, client)
+        .run(graph)
+        .await
+        .expect("run");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.history()
+    );
+    assert!(written.exists());
+    assert!(!forbidden.exists());
+    assert!(
+        report_file.exists(),
+        "workflow scripts retain their own access"
+    );
+    let requests = provider.requests();
+    assert!(
+        serde_json::to_string(&requests[2])
+            .expect("request")
+            .contains("First stage remembered.")
+    );
+}
+
+#[tokio::test]
+async fn host_ceiling_refuses_acp_before_starting_a_process() {
+    let dir = RunDir::new("permissions-acp");
+    let (client, _) = scripted_client(Vec::new());
+    let mut graph = graph("");
+    let config = node_config(&mut graph, "a");
+    config["backend"] = json!("acp");
+    config.as_object_mut().expect("object").remove("model");
+    let report = permission_runtime(&dir, client)
+        .capability(AgentPermissionCeiling(AgentPermissions::ReadOnly))
+        .run(graph)
+        .await
+        .expect("run");
+    assert_eq!(testkit::status_of(&report, "a").as_deref(), Some("failure"));
+    assert!(format!("{:?}", report.state.history()).contains("unsupported_permissions"));
+}
+
+#[tokio::test]
+async fn agent_hooks_obey_stage_permissions_and_host_ceiling() {
+    use frontend_attractor::hooks::{HookDefinition, HookEvent, HookKind};
+    let cases = [
+        ("read-only", AgentPermissions::Full),
+        ("full", AgentPermissions::ReadOnly),
+    ]
+    .into_iter()
+    .flat_map(|(stage, ceiling)| {
+        [
+            HookEvent::StageStart,
+            HookEvent::PreToolUse,
+            HookEvent::RunStart,
+        ]
+        .map(|event| (stage, ceiling, event))
+    });
+    for (stage, ceiling, event) in cases {
+        let dir = RunDir::new("hook-permissions");
+        let forbidden = dir.path().join("scopes/scope-0/work/hook-write.txt");
+        let mut calls = vec![
+            ScriptedCall::response(tool_call_response(
+                "write_file",
+                "write",
+                json!({"file_path": "hook-write.txt", "content": "forbidden"}),
+            )),
+            ScriptedCall::response(text_response(r#"{"ok":true}"#)),
+            ScriptedCall::response(text_response("Reviewed.")),
+        ];
+        let is_tool = event == HookEvent::PreToolUse;
+        if is_tool {
+            calls.insert(
+                0,
+                ScriptedCall::response(tool_call_response(
+                    "read_file",
+                    "read",
+                    json!({"file_path": "source.txt"}),
+                )),
+            );
+        }
+        let expected = calls.len();
+        let (client, provider) = scripted_client(calls);
+        let hook = HookDefinition {
+            name: "review gate".into(),
+            id: None,
+            event,
+            kind: HookKind::Agent {
+                prompt:          "Review".into(),
+                model:           Some("test/model".into()),
+                max_tool_rounds: Some(3),
+            },
+            matcher: (event != HookEvent::RunStart).then(|| "^a$".into()),
+            blocking: None,
+            timeout_ms: None,
+            sandbox: None,
+            source: None,
+        };
+        let source = format!(
+            r#"digraph T {{ graph [default_model="test/model", default_permissions="{stage}"]
+            start [shape=Mdiamond] a [prompt="work"]
+            setup [shape=parallelogram, script="printf 'source for review' > source.txt"]
+            exit [shape=Msquare] start -> setup -> a -> exit }}"#
+        );
+        let settings = RunSettings {
+            hooks: vec![hook],
+            ..RunSettings::default()
+        };
+        let graph = frontend_attractor::lower(
+            "test.fabro",
+            &source,
+            &NoFiles,
+            &CompileInputs::new(),
+            settings,
+            Diagnostics::new(),
+        )
+        .graph
+        .expect("graph");
+        let report = permission_runtime(&dir, client)
+            .capability(AgentPermissionCeiling(ceiling))
+            .run(graph)
+            .await
+            .expect("run");
+        assert_eq!(
+            report.status,
+            RunStatus::Success,
+            "{:?}",
+            report.state.history()
+        );
+        assert!(!forbidden.exists());
+        let requests = provider.requests();
+        assert_eq!(requests.len(), expected, "hook actually ran");
+        if is_tool {
+            assert!(
+                serde_json::to_string(requests.last().expect("request"))
+                    .expect("request")
+                    .contains("source for review"),
+                "native reads remain allowed"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn stage_outputs_leave_out_agent_permissions() {
+    let dir = RunDir::new("permissions-output");
+    let (client, _) = scripted_client(vec![ScriptedCall::response(text_response("Done."))]);
+    let report = permission_runtime(&dir, client)
+        .run(graph(r#"permissions="read-only""#))
+        .await
+        .expect("run");
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.history()
+    );
+    for stage in ["start", "exit"] {
+        let output = output_of(&report, stage);
+        assert!(
+            output.get("permissions").is_none() && output.get("default_permissions").is_none(),
+            "{stage}: {output}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn parallel_hooks_use_the_parallel_nodes_permissions() {
+    use frontend_attractor::hooks::{HookDefinition, HookEvent, HookKind};
+    let cases = [
+        ("read-only", AgentPermissions::Full),
+        ("full", AgentPermissions::ReadOnly),
+    ]
+    .into_iter()
+    .flat_map(|(fork, ceiling)| {
+        [HookEvent::ParallelStart, HookEvent::ParallelComplete].map(|event| (fork, ceiling, event))
+    });
+    for (fork, ceiling, event) in cases {
+        let dir = RunDir::new("parallel-hook-permissions");
+        let forbidden = dir.path().join("scopes/scope-0/work/hook-write.txt");
+        let calls = vec![
+            ScriptedCall::response(tool_call_response(
+                "write_file",
+                "write",
+                json!({"file_path": "hook-write.txt", "content": "forbidden"}),
+            )),
+            ScriptedCall::response(text_response(r#"{"ok":true}"#)),
+        ];
+        let expected = calls.len();
+        let (client, provider) = scripted_client(calls);
+        let hook = HookDefinition {
+            name: "fork gate".into(),
+            id: None,
+            event,
+            kind: HookKind::Agent {
+                prompt:          "Review".into(),
+                model:           Some("test/model".into()),
+                max_tool_rounds: Some(3),
+            },
+            matcher: Some("^fork$".into()),
+            blocking: None,
+            timeout_ms: None,
+            sandbox: None,
+            source: None,
+        };
+        // The graph default is `full`: only the parallel node restricts.
+        let source = format!(
+            r#"digraph T {{ graph [default_model="test/model"]
+            start [shape=Mdiamond] exit [shape=Msquare]
+            fork [shape=component, permissions="{fork}"]
+            ok [shape=parallelogram, script="true"]
+            also [shape=parallelogram, script="true"]
+            merge [shape=tripleoctagon]
+            start -> fork fork -> ok fork -> also ok -> merge also -> merge merge -> exit }}"#
+        );
+        let settings = RunSettings {
+            hooks: vec![hook],
+            ..RunSettings::default()
+        };
+        let graph = frontend_attractor::lower(
+            "test.fabro",
+            &source,
+            &NoFiles,
+            &CompileInputs::new(),
+            settings,
+            Diagnostics::new(),
+        )
+        .graph
+        .expect("graph");
+        let report = permission_runtime(&dir, client)
+            .capability(AgentPermissionCeiling(ceiling))
+            .run(graph)
+            .await
+            .expect("run");
+        assert_eq!(
+            report.status,
+            RunStatus::Success,
+            "{event:?}: {:?}",
+            report.state.history()
+        );
+        assert_eq!(
+            provider.requests().len(),
+            expected,
+            "{event:?}: the hook actually ran"
+        );
+        assert!(!forbidden.exists(), "{fork}, {ceiling:?}, {event:?}");
+    }
+}
+
+/// Pebble refuses MCP tools below `full`, so a restricted stage never starts
+/// the run's MCP servers.
+#[tokio::test]
+async fn restricted_stages_start_no_mcp_server() {
+    for (level, starts) in [("read-only", false), ("read-write", false), ("full", true)] {
+        let dir = RunDir::new("permissions-mcp");
+        let marker = dir.path().join("mcp-started");
+        let (client, _) = scripted_client(vec![ScriptedCall::response(text_response("Done."))]);
+        let settings = RunSettings {
+            mcps: vec![McpServer {
+                name:               "probe".to_owned(),
+                transport:          McpTransport::Stdio {
+                    command: vec![
+                        "sh".to_owned(),
+                        "-c".to_owned(),
+                        format!("touch '{}'; sleep 5", marker.display()),
+                    ],
+                    env:     BTreeMap::new(),
+                },
+                startup_timeout_ms: 1_000,
+                tool_timeout_ms:    DEFAULT_TOOL_TIMEOUT_MS,
+                source:             "workflow.toml".to_owned(),
+            }],
+            ..RunSettings::default()
+        };
+        let source = format!(
+            r#"digraph T {{ graph [default_model="test/model"]
+            start [shape=Mdiamond] exit [shape=Msquare]
+            a [prompt="work", permissions="{level}"] start -> a -> exit }}"#
+        );
+        let graph = frontend_attractor::lower(
+            "test.fabro",
+            &source,
+            &NoFiles,
+            &CompileInputs::new(),
+            settings,
+            Diagnostics::new(),
+        )
+        .graph
+        .expect("graph");
+        let report = permission_runtime(&dir, client)
+            .run(graph)
+            .await
+            .expect("run");
+        assert_eq!(
+            report.status,
+            RunStatus::Success,
+            "{:?}",
+            report.state.history()
+        );
+        assert_eq!(marker.exists(), starts, "{level}");
     }
 }

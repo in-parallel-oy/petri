@@ -18,9 +18,9 @@ use std::time::Duration;
 use std::{env, fs, process, thread};
 
 use attractor_steps::pebble::PebbleClient;
-use attractor_steps::register;
 use attractor_steps::skills::FabroHome;
 use attractor_steps::subagents::METRIC;
+use attractor_steps::{AgentPermissionCeiling, AgentPermissions, register};
 use execution::host::{self, HostRun};
 use execution::inspect::inspect_run_dir;
 use frontend::{CompileInputs, Diagnostics, Lowered, NoFiles};
@@ -1295,4 +1295,51 @@ async fn a_parent_still_delegates_after_its_own_compaction() {
         completed[0]["event"]["seq"].as_u64() < spawned[0]["event"]["seq"].as_u64(),
         "the compaction came first"
     );
+}
+
+#[tokio::test]
+async fn subagent_permissions_never_exceed_the_parent() {
+    for (attributes, ceiling) in [
+        (r#"permissions="read-only""#, AgentPermissions::Full),
+        (r#"permissions="full""#, AgentPermissions::ReadOnly),
+    ] {
+        let dir = RunDir::new("subagent-permissions");
+        let task = "child: attempt a write";
+        let forbidden = workspace(&dir).join("child-write.txt");
+        let (client, provider) = routed_client(
+            script(vec![
+                ScriptedCall::response(spawn(&[task])),
+                ScriptedCall::response(wait_for_children()),
+                ScriptedCall::response(text_response("Reviewed.")),
+            ]),
+            vec![(
+                task,
+                script(vec![
+                    ScriptedCall::response(tool_call_response(
+                        "write_file",
+                        "write",
+                        json!({"file_path": "child-write.txt", "content": "forbidden"}),
+                    )),
+                    ScriptedCall::response(text_response("Cannot write.")),
+                ]),
+            )],
+        );
+        let report = runtime(dir.path(), client, Retention::Always)
+            .capability(AgentPermissionCeiling(ceiling))
+            .run(graph(&one_agent(attributes), Vec::new()))
+            .await
+            .expect("run");
+        assert_eq!(
+            report.status,
+            RunStatus::Success,
+            "{:?}",
+            report.state.errors()
+        );
+        assert!(!forbidden.exists());
+        assert_eq!(
+            provider.lane(task).requests().len(),
+            2,
+            "child actually ran"
+        );
+    }
 }

@@ -61,6 +61,9 @@ pub const DEFAULT_COMMAND_ENV: &str = "PETRI_ACP_COMMAND";
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentConfig {
+    /// Tool permissions for this stage, capped by the embedding host.
+    #[serde(default)]
+    pub permissions:          crate::AgentPermissions,
     #[serde(default)]
     pub backend:              AgentBackend,
     pub label:                String,

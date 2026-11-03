@@ -21,6 +21,8 @@ use crate::mcps::McpServer;
 /// resolved (rendered, merged across layers) before it arrives here.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RunSettings {
+    /// Default agent tool permissions (`[run.agent] permissions`).
+    pub permissions:    crate::AgentPermissions,
     /// The run goal the settings state, rendered (`[run] goal`, or the
     /// launch's goal above it). It replaces the graph's own `goal`
     /// attribute; `None` leaves the graph's in charge.

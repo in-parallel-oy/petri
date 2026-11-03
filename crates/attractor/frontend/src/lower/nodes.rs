@@ -45,9 +45,13 @@ impl Ctx<'_> {
             &mut self.diags,
         );
         let explicit = self.explicit_timeout(node);
+        let permissions = self
+            .permissions_attr(&node.attrs, "permissions", &node.span)
+            .unwrap_or(self.permissions);
 
         let mut meta = json!({
             "label": label,
+            "permissions": permissions,
             "shape": shape,
             "kind": kind.name(),
             "classes": node.classes,
@@ -77,6 +81,8 @@ impl Ctx<'_> {
                     "node": node.id,
                     "kind": kind.name(),
                     "label": label,
+                    "permissions": permissions,
+                    "default_permissions": self.permissions,
                     "workflow": self.workflow_name,
                     "kv": placeholder(kv),
                 });
@@ -111,7 +117,8 @@ impl Ctx<'_> {
                 {
                     // A prompted fan-in: the ordered barrier, then one model
                     // call over the branch results.
-                    let mut config = self.agent_config(node, kind, workflow, policy, explicit);
+                    let mut config =
+                        self.agent_config(node, kind, workflow, policy, explicit, permissions);
                     Self::fan_in_sources(node, workflow, &mut config);
                     (
                         Some(StepRef::new(PROMPT_KIND, config)),
@@ -123,7 +130,8 @@ impl Ctx<'_> {
             }
             Kind::Parallel => (None, explicit.unwrap_or(STRUCTURAL_TIMEOUT)),
             Kind::Agent => {
-                let mut config = self.agent_config(node, kind, workflow, policy, explicit);
+                let mut config =
+                    self.agent_config(node, kind, workflow, policy, explicit, permissions);
                 if let Some(object) = config.as_object_mut() {
                     object.insert("compaction".into(), self.settings.compaction.to_json());
                 }
@@ -133,7 +141,7 @@ impl Ctx<'_> {
                 )
             }
             Kind::Prompt => {
-                let config = self.agent_config(node, kind, workflow, policy, explicit);
+                let config = self.agent_config(node, kind, workflow, policy, explicit, permissions);
                 (
                     Some(StepRef::new(PROMPT_KIND, config)),
                     explicit.unwrap_or(AGENT_TIMEOUT),
@@ -168,7 +176,7 @@ impl Ctx<'_> {
                 (Some(StepRef::new(WAIT_KIND, config)), timeout)
             }
             Kind::ManagerLoop => {
-                let config = self.workflow_config(node, workflow, policy);
+                let config = self.workflow_config(node, workflow, policy, permissions);
                 (
                     Some(StepRef::new(WORKFLOW_KIND, config)),
                     explicit.unwrap_or(AGENT_TIMEOUT),
@@ -259,6 +267,7 @@ impl Ctx<'_> {
         workflow: &Workflow,
         policy: FailurePolicy,
         timeout: Option<Duration>,
+        permissions: crate::AgentPermissions,
     ) -> Value {
         let mut config = self.base_config(node, workflow, policy, timeout);
         config.insert("kind".into(), Value::String(kind.name().into()));
@@ -291,6 +300,16 @@ impl Ctx<'_> {
             .or_else(|| workflow.attrs.text("backend"));
         // Fabro's `backend_valid`: an ACP agent reads no API-only attribute.
         let acp_backend = !is_prompt && backend.as_deref() == Some("acp");
+        if !is_prompt {
+            config.insert("permissions".into(), json!(permissions));
+            if acp_backend && permissions != crate::AgentPermissions::Full {
+                self.diags.error(
+                    "attractor.permissions_backend",
+                    node.span.clone(),
+                    "backend=acp cannot enforce restricted agent permissions; use backend=api",
+                );
+            }
+        }
         if acp_backend {
             lints::acp_api_only_attributes(node, &self.styled, &mut self.diags);
         }

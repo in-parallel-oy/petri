@@ -110,6 +110,9 @@ impl Decision {
 /// prompt or agent hook evaluates. Absent fields are left out.
 #[derive(Clone, Debug, Serialize)]
 pub struct Context {
+    /// Effective access for an agent hook; not part of the hook wire payload.
+    #[serde(skip)]
+    pub permissions:    crate::AgentPermissions,
     pub event:          HookEvent,
     pub run_id:         String,
     pub workflow_name:  String,
@@ -148,8 +151,18 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(event: HookEvent, run_id: String, workflow_name: String) -> Self {
+    /// A context for `event`. `permissions` is the access an agent hook run
+    /// with this context gets, already capped by the host ceiling: there is
+    /// no default, so no context reaches an agent hook with access nobody
+    /// chose.
+    pub fn new(
+        event: HookEvent,
+        run_id: String,
+        workflow_name: String,
+        permissions: crate::AgentPermissions,
+    ) -> Self {
         Self {
+            permissions,
             event,
             run_id,
             workflow_name,
@@ -285,17 +298,20 @@ struct Configured {
 }
 
 struct Config {
-    hooks:    Vec<Configured>,
-    workflow: String,
+    hooks:               Vec<Configured>,
+    workflow:            String,
+    /// The access an agent hook outside any stage gets.
+    default_permissions: crate::AgentPermissions,
 }
 
 /// The local hook service.
 pub struct LocalHooks {
-    config: Mutex<Option<Arc<Config>>>,
-    run:    Mutex<Option<RunInfo>>,
-    client: Mutex<Option<PebbleClient>>,
-    envs:   ScopeEnvironments,
-    http:   executors::HttpClients,
+    ceiling: Mutex<crate::AgentPermissions>,
+    config:  Mutex<Option<Arc<Config>>>,
+    run:     Mutex<Option<RunInfo>>,
+    client:  Mutex<Option<PebbleClient>>,
+    envs:    ScopeEnvironments,
+    http:    executors::HttpClients,
 }
 
 tokio::task_local! {
@@ -319,6 +335,7 @@ impl Default for LocalHooks {
 impl LocalHooks {
     pub fn new(envs: ScopeEnvironments) -> Self {
         Self {
+            ceiling: Mutex::new(crate::AgentPermissions::Full),
             config: Mutex::new(None),
             run: Mutex::new(None),
             client: Mutex::new(None),
@@ -339,6 +356,11 @@ impl LocalHooks {
         *self.run.lock().unwrap_or_else(PoisonError::into_inner) = Some(run);
     }
 
+    /// Set the embedding host's ceiling for all local agent hooks.
+    pub fn set_permission_ceiling(&self, ceiling: crate::AgentPermissions) {
+        *self.ceiling.lock().unwrap_or_else(PoisonError::into_inner) = ceiling;
+    }
+
     /// The model client prompt and agent hooks use.
     pub fn set_client(&self, client: Option<PebbleClient>) {
         *self.client.lock().unwrap_or_else(PoisonError::into_inner) = client;
@@ -346,7 +368,12 @@ impl LocalHooks {
 
     /// Install the run's hook list, once. Later calls with the same list are
     /// no-ops; a different list replaces it (a second run on one runtime).
-    pub fn configure(&self, hooks: &[HookDefinition], workflow: &str) {
+    pub fn configure(
+        &self,
+        hooks: &[HookDefinition],
+        workflow: &str,
+        default_permissions: crate::AgentPermissions,
+    ) {
         let configured = hooks
             .iter()
             .map(|definition| Configured {
@@ -358,13 +385,14 @@ impl LocalHooks {
             })
             .collect();
         *self.config.lock().unwrap_or_else(PoisonError::into_inner) = Some(Arc::new(Config {
-            hooks:    configured,
+            hooks: configured,
             workflow: workflow.to_owned(),
+            default_permissions,
         }));
     }
 
-    /// Configure from a stage config that carries `hooks` and `workflow`,
-    /// when it does.
+    /// Configure from a stage config that carries `hooks`, `workflow` and
+    /// `default_permissions`, when it does.
     pub fn configure_from(&self, config: &Value) -> bool {
         let Some(list) = config.get("hooks") else {
             return false;
@@ -374,7 +402,9 @@ impl LocalHooks {
             .get("workflow")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        self.configure(&hooks, workflow);
+        let default_permissions =
+            permissions_in(config.get("default_permissions")).unwrap_or_default();
+        self.configure(&hooks, workflow, default_permissions);
         true
     }
 
@@ -418,10 +448,21 @@ impl LocalHooks {
         )
     }
 
-    /// A context with the run's identity filled in.
+    /// A context with the run's identity and its agent hooks' access, capped
+    /// by the host ceiling, filled in.
     pub fn context(&self, event: HookEvent) -> Context {
         let (run_id, workflow_name) = self.run_info();
-        Context::new(event, run_id, workflow_name)
+        let requested = self
+            .config()
+            .map_or(crate::AgentPermissions::Full, |config| {
+                config.default_permissions
+            });
+        Context::new(event, run_id, workflow_name, self.capped(requested))
+    }
+
+    /// `requested`, capped by the embedding host's ceiling.
+    fn capped(&self, requested: crate::AgentPermissions) -> crate::AgentPermissions {
+        requested.min(*self.ceiling.lock().unwrap_or_else(PoisonError::into_inner))
     }
 
     /// Run every configured hook matching `context.event`, in order, with
@@ -639,6 +680,7 @@ fn edge_for_target(view: &FiringView, to: &str) -> Option<(u32, EdgeId)> {
 impl LocalHooks {
     fn stage_context(&self, event: HookEvent, view: &FiringView) -> Context {
         let mut context = self.context(event);
+        self.stage_permissions(&mut context, view);
         context.node_id = Some(view.node_name().to_owned());
         context.node_label = view
             .meta()
@@ -647,6 +689,15 @@ impl LocalHooks {
             .map(str::to_owned);
         context.handler_type = handler_type(view);
         context
+    }
+
+    /// The stage's agent access, from its view's meta, capped by the host
+    /// ceiling: the lowered node's meta, or the level a step-built view
+    /// carries.
+    fn stage_permissions(&self, context: &mut Context, view: &FiringView) {
+        if let Some(requested) = permissions_in(view.meta().get("permissions")) {
+            context.permissions = self.capped(requested);
+        }
     }
 
     fn env_for(&self, view: &FiringView) -> Option<Arc<dyn ExecEnv>> {
@@ -700,6 +751,8 @@ impl LocalHooks {
             return HookReport::proceed(point);
         };
         let mut context = self.context(HookEvent::ParallelComplete);
+        // The fan-in step's view carries the parallel node's level.
+        self.stage_permissions(&mut context, view);
         context.node_id = Some(completed.fork.to_string());
         context.handler_type = Some("parallel".into());
         context.cwd = self
@@ -1033,11 +1086,30 @@ pub fn warning_event(
     }))
 }
 
+/// The permission level a config or meta value names. A value that is not a
+/// level fails closed to `read-only`.
+fn permissions_in(value: Option<&Value>) -> Option<crate::AgentPermissions> {
+    value.map(|value| {
+        value
+            .as_str()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(crate::AgentPermissions::ReadOnly)
+    })
+}
+
 /// A `FiringView` for a step that asks a point itself (the tool boundary,
 /// the start stage's points, a fork's): what the service reads from a view,
-/// built from the step's context. `kind` is the Fabro handler type.
-pub fn step_view(ctx: &steps::StepCtx, kind: &str, label: &str, kv: &Value) -> Arc<FiringView> {
-    view_of(ctx, kind, label, kv, None)
+/// built from the step's context. `kind` is the Fabro handler type;
+/// `permissions` is the stage's effective agent access, already capped by
+/// the host ceiling, for the agent hooks attached to it.
+pub fn step_view(
+    ctx: &steps::StepCtx,
+    kind: &str,
+    label: &str,
+    kv: &Value,
+    permissions: crate::AgentPermissions,
+) -> Arc<FiringView> {
+    view_of(ctx, kind, label, kv, None, permissions)
 }
 
 /// [`step_view`] with the step's resolved config on the view, for a step
@@ -1049,6 +1121,7 @@ pub fn view_of(
     label: &str,
     kv: &Value,
     config: Option<Value>,
+    permissions: crate::AgentPermissions,
 ) -> Arc<FiringView> {
     let node = ir::Node::new(
         ir::NodeId::new(0),
@@ -1056,7 +1129,7 @@ pub fn view_of(
         ctx.scope,
         ir::StepRef::new(kind, Value::Null),
     )
-    .with_meta(json!({ "kind": kind, "label": label }));
+    .with_meta(json!({ "kind": kind, "label": label, "permissions": permissions }));
     let mut context = ir::RunContext::new();
     if let Value::Object(map) = kv {
         context.merge(
@@ -1117,6 +1190,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn run_level_contexts_take_the_workflow_default_capped_by_the_ceiling() {
+        use crate::AgentPermissions::{Full, ReadOnly, ReadWrite};
+        let hooks = LocalHooks::default();
+        assert_eq!(hooks.context(HookEvent::RunStart).permissions, Full);
+        hooks.configure(&[], "w", ReadWrite);
+        assert_eq!(hooks.context(HookEvent::RunStart).permissions, ReadWrite);
+        hooks.set_permission_ceiling(ReadOnly);
+        assert_eq!(hooks.context(HookEvent::RunStart).permissions, ReadOnly);
+    }
+
+    #[test]
     fn decisions_merge_as_fabro_merges_them() {
         let block = Decision::Block { reason: None };
         let skip = Decision::Skip { reason: None };
@@ -1156,14 +1240,24 @@ mod tests {
             },
             matcher:    pattern.and_then(|p| regex::Regex::new(p).ok()),
         };
-        let mut context = Context::new(HookEvent::StageStart, String::new(), String::new());
+        let mut context = Context::new(
+            HookEvent::StageStart,
+            String::new(),
+            String::new(),
+            crate::AgentPermissions::ReadOnly,
+        );
         context.node_id = Some("implement_step".into());
         context.handler_type = Some("agent".into());
         assert!(matches(&hook(None), &context));
         assert!(matches(&hook(Some("implement")), &context));
         assert!(matches(&hook(Some("^agent$")), &context));
         assert!(!matches(&hook(Some("^implement$")), &context));
-        let bare = Context::new(HookEvent::StageStart, String::new(), String::new());
+        let bare = Context::new(
+            HookEvent::StageStart,
+            String::new(),
+            String::new(),
+            crate::AgentPermissions::ReadOnly,
+        );
         assert!(!matches(&hook(Some("agent")), &bare), "no field, no match");
         assert!(matches(&hook(None), &bare));
     }

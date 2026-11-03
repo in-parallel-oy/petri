@@ -34,9 +34,7 @@ use frontend_attractor::hooks::{
     DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_MODEL, HookDefinition, HookKind, TlsMode,
 };
 use lithos_llm::types::{Message, Request, ResponseFormat, Role};
-use pebble_coding_agent::events::{
-    CodingAgentEvent, CodingEvent, EventSink, EventSinkError, PermissionLevel,
-};
+use pebble_coding_agent::events::{CodingAgentEvent, CodingEvent, EventSink, EventSinkError};
 use pebble_coding_agent::{
     CodingAgent, CodingAgentOptions, Error as AgentError, PromptReport, ShutdownReason,
 };
@@ -50,6 +48,7 @@ use tokio_util::sync::CancellationToken;
 use super::{Context, Decision, IN_HOOK};
 use crate::pebble::PebbleClient;
 use crate::pebble::environment::PebbleEnvironment;
+use crate::permissions;
 
 /// Fabro's prompt for its hook evaluator.
 const EVALUATOR_SYSTEM: &str = "You are a hook evaluator for a workflow engine. Given context \
@@ -526,6 +525,7 @@ async fn agent_hook(
         return Execution::of(Executed::FailedOpen(ROUNDS_EXHAUSTED.into()));
     };
     let work = AgentWork {
+        permissions:  context.permissions,
         client:       client.clone(),
         env:          env.clone(),
         model:        model.unwrap_or(DEFAULT_MODEL).to_owned(),
@@ -616,6 +616,7 @@ fn account(usage: &mut HookUsage, report: &PromptReport) {
 
 /// One agent hook's work, owned by the task that runs it.
 struct AgentWork {
+    permissions:  crate::AgentPermissions,
     client:       PebbleClient,
     env:          Arc<dyn ExecEnv>,
     model:        String,
@@ -746,7 +747,7 @@ impl AgentWork {
         CodingAgent::builder(self.client.0.clone(), Arc::new(environment))
             .model(&self.model)
             .options(CodingAgentOptions::default().with_max_tool_rounds(self.rounds))
-            .permission_level(PermissionLevel::Full)
+            .permission_level(permissions::pebble(self.permissions))
             .event_sink(events)
             .build()
             .await

@@ -57,7 +57,7 @@ use toml::de::Error as TomlError;
 use crate::hooks::{PROJECT_FILE, SETTINGS_HOOKS_VAR};
 use crate::model_layers::LaunchModel;
 use crate::secrets::{InterpolationError, interpolate};
-use crate::skills;
+use crate::{agent_permissions, skills};
 
 /// The settings schema version this build reads, Fabro's `_version`.
 const WORKFLOW_TOML_VERSION: i64 = 1;
@@ -73,16 +73,19 @@ pub const ENVIRONMENT_PARAM: &str = "fabro.environment";
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Settings {
     /// What the Attractor lowering applies.
-    pub run:          RunSettings,
+    pub run:               RunSettings,
     /// The launch's model choice and the host's default, as given; already
     /// folded into `run.model_override` and `run.model`.
-    pub launch:       LaunchModel,
+    pub launch:            LaunchModel,
     /// `[run.execution]`.
-    pub dry_run:      bool,
-    pub auto_approve: bool,
+    pub dry_run:           bool,
+    pub auto_approve:      bool,
     /// The file's path and text, for the hook and MCP loaders'
     /// `workflow.toml` layer.
-    pub hooks_text:   Option<(String, String)>,
+    pub hooks_text:        Option<(String, String)>,
+    /// `[run.agent] permissions` as this file sets it, before the lower
+    /// layers fill it into `run.permissions`.
+    pub agent_permissions: Option<frontend_attractor::AgentPermissions>,
 }
 
 impl Settings {
@@ -792,15 +795,17 @@ impl Reader<'_> {
             return;
         };
         // Fabro's `[run.agent]` accepts `fabro_tools` and `mcps` only. Neither
-        // sub-agents (readiness item 9d) nor compaction (item 9e) has a
+        // sub-agents nor compaction has a
         // `workflow.toml` surface at the pinned revision: every native agent
         // gets the sub-agent tools (`super::subagents`), and compaction is
         // always on with Fabro's hardcoded values (`lower::compaction`), so a
         // key asking for either is refused as Fabro refuses it, never passed
-        // silently. `skills` is the standalone
-        // runner's own extension (`skills::read`).
+        // silently. `skills` and `permissions` are Petri extensions.
         for key in agent.keys() {
-            if !matches!(key.as_str(), "fabro_tools" | "mcps" | "skills") {
+            if !matches!(
+                key.as_str(),
+                "fabro_tools" | "mcps" | "skills" | "permissions"
+            ) {
                 let path = self.path;
                 let (message, hint) = if key == "compaction" {
                     (
@@ -834,6 +839,10 @@ impl Reader<'_> {
                 };
                 self.unsupported("workflow_toml.key", message, hint);
             }
+        }
+        if let Some(value) = agent.get("permissions") {
+            self.settings.agent_permissions =
+                agent_permissions::read(value, self.path, &self.span, self.diags);
         }
         if let Some(value) = agent.get("skills") {
             self.settings.run.skills = skills::read(value, self.path, &self.span, self.diags);

@@ -1606,3 +1606,13 @@ language's. Each keeps its name and behavior.
   `FABRO_WORKFLOW`, `FABRO_NODE_ID`, `FABRO_HOOK_CONTEXT` and the
   `.fabro-hook-context-*.json` file (`attractor_steps::hooks`). User scripts
   read these names.
+
+## Agent permissions (Petri extension)
+
+A node's `permissions` and the graph's `default_permissions` select an agent
+stage's tool access: `read-only`, `read-write`, or `full`. Omission preserves
+`full`. Shell commands, including Git inspection, require `full`. Both
+attributes warn `attractor.petri_extension`: Fabro does not read them, so under
+Fabro the same agents keep full access. See
+[Agent permissions](../../docs/agent-permissions.md) for precedence, hooks, ACP,
+the host ceiling, and the tool categories.

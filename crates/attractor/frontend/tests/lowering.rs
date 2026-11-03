@@ -2636,3 +2636,188 @@ fn full_fidelity_on_a_parallel_branch_warns_that_it_is_degraded() {
     assert!(degraded.iter().any(|d| d.message.contains("`a`")));
     assert!(degraded.iter().any(|d| d.message.contains("fork -> b")));
 }
+
+#[test]
+fn agent_permissions_resolve_defaults_and_stage_overrides() {
+    let graph = lower_ok(&dot(r#"
+        graph [default_permissions="read-only"]
+        a [prompt="review"]
+        b [prompt="edit", permissions="read-write"]
+        c [prompt="test", permissions="full"]
+        start -> a -> b -> c -> exit
+    "#));
+    assert_eq!(node(&graph, "a").step.config["permissions"], "read-only");
+    assert_eq!(node(&graph, "b").step.config["permissions"], "read-write");
+    assert_eq!(node(&graph, "c").step.config["permissions"], "full");
+    let graph = lower_ok(&dot(r#"a [prompt="work"] start -> a -> exit"#));
+    assert_eq!(node(&graph, "a").step.config["permissions"], "full");
+}
+
+#[test]
+fn invalid_permissions_and_restricted_acp_are_rejected() {
+    for attr in [
+        r#"permissions="readonly""#,
+        "permissions=true",
+        "permissions=1",
+    ] {
+        assert!(has_code(
+            &dot(&format!(r#"a [prompt="work", {attr}] start -> a -> exit"#)),
+            "attractor.permissions"
+        ));
+    }
+    assert!(has_code(
+        &dot(r#"
+        graph [default_permissions="invalid"]
+        a [prompt="work", permissions="full"] start -> a -> exit
+    "#),
+        "attractor.permissions"
+    ));
+    assert!(has_code(
+        &dot(r#"
+        graph [default_permissions="read-only", backend="acp"]
+        a [prompt="work"] start -> a -> exit
+    "#),
+        "attractor.permissions_backend"
+    ));
+}
+
+#[test]
+fn an_imported_workflow_keeps_its_default_permissions_below_the_import_site() {
+    let files = files(&[(
+        "flows/review.fabro",
+        r#"digraph Review {
+            graph [default_permissions="read-only"]
+            start [shape=Mdiamond]
+            exit [shape=Msquare]
+            read [prompt="review"]
+            edit [prompt="fix", permissions="read-write"]
+            start -> read -> edit -> exit
+        }"#,
+    )]);
+    let load = |text: &str| {
+        let lowered =
+            frontend_attractor::load("flows/main.fabro", text, &files, &CompileInputs::new());
+        lowered.graph.expect("lowers")
+    };
+    let graph = load(&dot(r#"r [import="review.fabro"] start -> r -> exit"#));
+    assert_eq!(
+        node(&graph, "r.read").step.config["permissions"],
+        "read-only"
+    );
+    assert_eq!(
+        node(&graph, "r.edit").step.config["permissions"],
+        "read-write"
+    );
+    let graph = load(&dot(
+        r#"r [import="review.fabro", permissions="full"] start -> r -> exit"#,
+    ));
+    assert_eq!(
+        node(&graph, "r.read").step.config["permissions"],
+        "full",
+        "the import site overrides the imported default"
+    );
+    assert_eq!(
+        node(&graph, "r.edit").step.config["permissions"],
+        "read-write",
+        "a node's own selection wins"
+    );
+}
+
+#[test]
+fn a_nested_workflow_defaults_to_its_calling_node_permissions() {
+    let child = |graph_attrs: &str| {
+        format!(
+            "digraph C {{ {graph_attrs} start [shape=Mdiamond] exit [shape=Msquare] \
+             work [prompt=\\\"work\\\"] start -> work -> exit }}"
+        )
+    };
+    let lowered_child = |parent: &str| {
+        let lowered =
+            frontend_attractor::load("main.fabro", &dot(parent), &NoFiles, &CompileInputs::new());
+        assert!(
+            !lowered.diagnostics.has_errors(),
+            "{:?}",
+            lowered.diagnostics
+        );
+        let graph = lowered.graph.expect("lowers");
+        let digest = node(&graph, "m").step.config["child_digest"]
+            .as_str()
+            .expect("child digest")
+            .to_owned();
+        lowered
+            .children
+            .into_iter()
+            .find(|child| frontend::graph_digest(child) == digest)
+            .expect("registered child")
+    };
+    let manager = |attrs: &str, graph_attrs: &str| {
+        format!(
+            r#"graph [default_permissions="read-only"]
+            m [shape=house, stack.child_dot_source="{}"{attrs}]
+            start -> m -> exit"#,
+            child(graph_attrs)
+        )
+    };
+    let child_level = |attrs: &str, graph_attrs: &str| {
+        lowered_child(&manager(attrs, graph_attrs))
+            .nodes
+            .iter()
+            .find(|n| n.name == "work")
+            .expect("work")
+            .step
+            .config["permissions"]
+            .clone()
+    };
+    assert_eq!(
+        child_level("", ""),
+        "read-only",
+        "the parent graph's default"
+    );
+    assert_eq!(
+        child_level(r#", permissions="read-write""#, ""),
+        "read-write",
+        "the calling node's own level"
+    );
+    assert_eq!(
+        child_level("", r#"graph [default_permissions=\"full\"]"#),
+        "full",
+        "the child's graph default overrides, as over run settings"
+    );
+}
+
+#[test]
+fn permission_attributes_warn_as_petri_extensions() {
+    let warned = |text: &str| {
+        diagnostics(&dot(text))
+            .into_iter()
+            .filter(|d| d.code == "attractor.petri_extension")
+            .count()
+    };
+    assert_eq!(warned(r#"a [prompt="work"] start -> a -> exit"#), 0);
+    assert_eq!(
+        warned(r#"a [prompt="work", permissions="read-only"] start -> a -> exit"#),
+        1
+    );
+    assert_eq!(
+        warned(
+            r#"graph [default_permissions="read-only"]
+            a [prompt="work", permissions="full"] start -> a -> exit"#
+        ),
+        2
+    );
+}
+
+#[test]
+fn an_invalid_level_on_an_acp_node_is_not_also_an_acp_error() {
+    let found = codes(&dot(
+        r#"a [prompt="work", backend="acp", permissions="readonly"] start -> a -> exit"#,
+    ));
+    assert!(
+        found.contains(&"attractor.permissions".to_owned()),
+        "{found:?}"
+    );
+    assert!(
+        !found.contains(&"attractor.permissions_backend".to_owned()),
+        "the misspelling is the one error: {found:?}"
+    );
+}

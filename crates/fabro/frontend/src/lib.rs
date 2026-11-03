@@ -20,6 +20,7 @@
 //! (`crates/attractor/FORMAT.md`). `crates/fabro/FORMAT.md` says how each
 //! file section lowers.
 
+mod agent_permissions;
 pub mod fallbacks;
 pub mod hooks;
 pub mod mcps;
@@ -44,6 +45,10 @@ use serde_json::Value;
 use smol_str::SmolStr;
 pub use workflow_toml::{ENVIRONMENT_PARAM, LAUNCH_PARAM, Settings};
 
+/// The warning that marks a settings key Fabro's reference schema refuses as
+/// a Petri extension.
+pub(crate) const PETRI_EXTENSION: &str = "fabro.petri_extension";
+
 /// Read the settings layers beside `file` and lower the workflow under them.
 /// `file` is the repository-relative path the spans carry and `@file`
 /// references resolve beside; `files` reads them and the settings files;
@@ -57,6 +62,8 @@ pub fn load(file: &str, text: &str, files: &dyn FileSource, inputs: &CompileInpu
         return Lowered::rejected(diags);
     }
     model_layers::apply(files, inputs, &mut settings.run.model, &mut diags);
+    settings.run.permissions =
+        agent_permissions::resolve(files, inputs, settings.agent_permissions, &mut diags);
     // The launch itself: what `petri run --model`/`--provider` asked for
     // overrides the files and the graph's defaults, and the host's default
     // fills what nothing else set.

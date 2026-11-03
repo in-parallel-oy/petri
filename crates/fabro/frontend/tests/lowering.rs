@@ -1599,3 +1599,102 @@ fn acp_node_overrides_replace_the_graph_agent_through_the_fabro_frontend() {
         assert_eq!(node(&graph, "review").step.config["acp"], overridden);
     }
 }
+
+#[test]
+fn run_agent_permissions_are_typed_defaults_below_graph_and_stage() {
+    let source = dot(
+        r#"a [prompt="review"] b [prompt="edit", permissions="read-write"] start -> a -> b -> exit"#,
+    );
+    let run = files(&[(
+        "wf/workflow.toml",
+        "[run.agent]\npermissions = 'read-only'\n",
+    )]);
+    let lowered = load("wf/workflow.fabro", &source, &run, &CompileInputs::new());
+    let graph = lowered.graph.expect("valid permissions");
+    assert_eq!(node(&graph, "a").step.config["permissions"], "read-only");
+    assert_eq!(node(&graph, "b").step.config["permissions"], "read-write");
+    let source = source.replace(
+        "digraph T {",
+        "digraph T { graph [default_permissions=\"full\"]",
+    );
+    let graph = load("wf/workflow.fabro", &source, &run, &CompileInputs::new())
+        .graph
+        .expect("graph overrides run");
+    assert_eq!(node(&graph, "a").step.config["permissions"], "full");
+    for value in ["'readonly'", "true", "1", "[]"] {
+        let bad = files(&[(
+            "wf/workflow.toml",
+            &format!("[run.agent]\npermissions = {value}\n"),
+        )]);
+        assert!(
+            load("wf/workflow.fabro", &source, &bad, &CompileInputs::new())
+                .graph
+                .is_none()
+        );
+    }
+}
+
+#[test]
+fn run_agent_permissions_layer_like_the_model_settings() {
+    let source = dot(r#"a [prompt="review"] start -> a -> exit"#);
+    let level = |workflow: Option<&str>, project: Option<&str>, host: Option<&str>| {
+        let mut pairs = Vec::new();
+        let workflow = workflow.map(|v| format!("[run.agent]\npermissions = '{v}'\n"));
+        let project = project.map(|v| format!("[run.agent]\npermissions = '{v}'\n"));
+        if let Some(text) = &workflow {
+            pairs.push(("wf/workflow.toml", text.as_str()));
+        }
+        if let Some(text) = &project {
+            pairs.push((".fabro/project.toml", text.as_str()));
+        }
+        let mut inputs = CompileInputs::new();
+        if let Some(v) = host {
+            inputs = inputs.with_var(
+                SETTINGS_HOOKS_VAR,
+                format!("[run.agent]\npermissions = '{v}'\n"),
+            );
+        }
+        let lowered = load("wf/workflow.fabro", &source, &files(&pairs), &inputs);
+        let warnings = lowered
+            .diagnostics
+            .iter()
+            .filter(|d| d.code == "fabro.petri_extension")
+            .count();
+        let graph = lowered.graph.expect("lowers");
+        (
+            node(&graph, "a").step.config["permissions"].clone(),
+            warnings,
+        )
+    };
+    assert_eq!(level(None, None, None), (json!("full"), 0));
+    assert_eq!(
+        level(None, None, Some("read-write")),
+        (json!("read-write"), 1)
+    );
+    assert_eq!(
+        level(None, Some("read-only"), None),
+        (json!("read-only"), 1)
+    );
+    assert_eq!(
+        level(None, Some("read-only"), Some("read-write")),
+        (json!("read-only"), 2),
+        "the project layer is above the host's"
+    );
+    assert_eq!(
+        level(Some("full"), Some("read-only"), Some("read-only")),
+        (json!("full"), 3),
+        "the bundle's workflow.toml is above both"
+    );
+
+    let bad_project = files(&[(
+        ".fabro/project.toml",
+        "[run.agent]\npermissions = 'readonly'\n",
+    )]);
+    let lowered = load(
+        "wf/workflow.fabro",
+        &source,
+        &bad_project,
+        &CompileInputs::new(),
+    );
+    assert!(lowered.graph.is_none(), "an invalid lower layer is refused");
+}

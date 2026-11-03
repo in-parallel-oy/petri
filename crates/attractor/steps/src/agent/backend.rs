@@ -19,6 +19,7 @@ use crate::acp::{AcpError, AcpHooks, Client, Stage};
 use crate::fallback::{ModelFailure, Plan};
 use crate::hooks::{ToolHookBinding, step_view};
 use crate::pebble::{NativeSession, Resume};
+use crate::permissions;
 
 /// How an agent node runs. The native API agent is the default, as Fabro's
 /// `select_run_backend` picks `Api` for a node that names no backend; the
@@ -142,6 +143,13 @@ impl Session {
                 .await
                 .map(|session| Self::Pebble(Box::new(session))),
             AgentBackend::Acp => {
+                if permissions::effective(config.permissions, ctx) != crate::AgentPermissions::Full
+                {
+                    return Err(AgentError::failed(
+                        "unsupported_permissions",
+                        "backend=acp cannot enforce restricted agent permissions; use backend=api",
+                    ));
+                }
                 let command = config
                     .command()
                     .map_err(|e| AgentError::failed("acp_unconfigured", e))?;
@@ -177,7 +185,13 @@ impl Session {
                     post.extend(service.configured_hooks(HookPoint::AfterToolFailure));
                     let binding = ToolHookBinding::new(
                         service.clone(),
-                        step_view(ctx, "agent", &config.label, &config.kv),
+                        step_view(
+                            ctx,
+                            "agent",
+                            &config.label,
+                            &config.kv,
+                            permissions::effective(config.permissions, ctx),
+                        ),
                         ctx.node.clone(),
                         ctx.firing,
                         ctx.attempt,

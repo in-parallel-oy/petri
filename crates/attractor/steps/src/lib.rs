@@ -31,6 +31,8 @@ pub mod human;
 mod outcome;
 pub mod parallel;
 pub mod pebble;
+mod permissions;
+pub use permissions::{AgentPermissionCeiling, AgentPermissions};
 pub mod prompt;
 pub mod route_usage;
 pub mod sessions;
@@ -133,6 +135,10 @@ pub fn services(runtime: Runtime) -> Runtime {
         };
         if let Some(local) = &local {
             local.set_run(run.clone());
+            local.set_permission_ceiling(
+                caps.get::<AgentPermissionCeiling>()
+                    .map_or(AgentPermissions::Full, |ceiling| ceiling.0),
+            );
             local.set_client(caps.get::<pebble::PebbleClient>().map(|c| (*c).clone()));
         }
         (

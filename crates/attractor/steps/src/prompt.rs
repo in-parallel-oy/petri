@@ -158,6 +158,10 @@ pub struct PromptConfig {
     /// A prompted fan-in: the parallel node it joins, for `parallel_complete`.
     #[serde(default)]
     pub fork:                 Option<String>,
+    /// The joined parallel node's agent permissions, for its
+    /// `parallel_complete` agent hooks.
+    #[serde(default)]
+    pub fork_permissions:     crate::AgentPermissions,
 }
 
 fn default_output_retries() -> u64 {
@@ -319,7 +323,7 @@ impl Step for PromptStep {
         let started = Instant::now();
         stage::record(&ctx);
         if let Some(fork) = &config.fork {
-            parallel_complete(&ctx, fork, &config.label).await;
+            parallel_complete(&ctx, fork, config.fork_permissions, &config.label).await;
         }
         let run_id = ctx
             .capability::<RunInfo>()

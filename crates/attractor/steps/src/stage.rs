@@ -33,7 +33,7 @@ use steps::{Step, StepCtx};
 use crate::hooks::{BLOCKED_CLASS, record_report, view_of};
 use crate::outcome::Stage;
 use crate::pebble::PebbleClient;
-use crate::{checkout, fallback};
+use crate::{checkout, fallback, permissions};
 
 pub const KIND: StepKindId = STAGE_KIND;
 
@@ -108,40 +108,46 @@ pub fn record(ctx: &StepCtx) {
 #[derive(Debug, Deserialize)]
 #[serde(default)]
 pub struct StageConfig {
-    pub node:      String,
-    pub kind:      String,
-    pub label:     String,
+    pub node:                String,
+    pub kind:                String,
+    pub label:               String,
     /// The run's merged `[[run.hooks]]`, on `start` and `exit`.
-    pub hooks:     Value,
+    pub hooks:               Value,
     /// The workflow's name, for `FABRO_WORKFLOW`.
-    pub workflow:  String,
+    pub workflow:            String,
     /// The run context at spawn.
-    pub kv:        Value,
+    pub kv:                  Value,
     /// `[run.clone]` and the repository the host bound, on the root
     /// `start` stage: the workspace is checked out from it first.
-    pub checkout:  Value,
+    pub checkout:            Value,
     /// `[run.model.fallbacks]` as written, on `start`: checked against the
     /// catalog before anything runs, so a table the run cannot use fails
     /// the run where Fabro's server refuses it, at run start, and not at
     /// the first LLM stage that would have read it. Absent once admission
     /// checked the table and pinned the run's routes.
-    pub fallbacks: Value,
+    pub fallbacks:           Value,
+    /// The stage's own agent permissions, for hooks attached to it.
+    pub permissions:         crate::AgentPermissions,
+    /// The run-level agent hooks' permissions, on `start` and `exit`.
+    pub default_permissions: crate::AgentPermissions,
     #[serde(flatten)]
-    pub rest:      serde_json::Map<String, Value>,
+    pub rest:                serde_json::Map<String, Value>,
 }
 
 impl Default for StageConfig {
     fn default() -> Self {
         Self {
-            node:      String::new(),
-            kind:      String::new(),
-            label:     String::new(),
-            hooks:     Value::Null,
-            workflow:  String::new(),
-            kv:        Value::Null,
-            checkout:  Value::Null,
-            fallbacks: Value::Null,
-            rest:      serde_json::Map::new(),
+            node:                String::new(),
+            kind:                String::new(),
+            label:               String::new(),
+            hooks:               Value::Null,
+            workflow:            String::new(),
+            kv:                  Value::Null,
+            checkout:            Value::Null,
+            fallbacks:           Value::Null,
+            permissions:         crate::AgentPermissions::Full,
+            default_permissions: crate::AgentPermissions::Full,
+            rest:                serde_json::Map::new(),
         }
     }
 }
@@ -236,6 +242,7 @@ async fn start_hooks(
         &config.label,
         &config.kv,
         Some(ctx.config.clone()),
+        permissions::effective(config.permissions, ctx),
     );
     let mut points: Vec<(HookPoint, HookEvent, Value)> = Vec::new();
     if !config.hooks.is_null() {
