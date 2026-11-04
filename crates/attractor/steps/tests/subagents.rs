@@ -217,9 +217,9 @@ async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
             task,
             script(vec![
                 ScriptedCall::response(tool_call_response(
-                    "shell",
+                    "write_file",
                     "write",
-                    json!({"command": "printf 'from child\\n' > child.txt && echo WROTE"}),
+                    json!({"file_path": "child.txt", "content": "from child\n"}),
                 )),
                 ScriptedCall::response(text_response("Wrote child.txt.")),
             ]),
@@ -241,6 +241,10 @@ async fn a_child_changes_the_parents_workspace_and_the_stage_accounts_for_it() {
         "the child acted in the parent's workspace"
     );
     assert_eq!(output_of(&report, "a")["text"], "The child wrote the file.");
+    assert_eq!(
+        output_of(&report, "a")["files_touched"],
+        json!(["child.txt"])
+    );
     assert_eq!(provider.lane(task).requests().len(), 2);
     let requests = provider.root().requests();
     assert_eq!(requests.len(), 3);

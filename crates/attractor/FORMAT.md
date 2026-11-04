@@ -599,6 +599,20 @@ last two and five stages; `summary:high` the per-stage report with a context
 table. A stage value above 8 KiB is shown as a preview. `full` sends no
 preamble: the node continues its thread's conversation.
 
+Native agent outcomes include `files_touched` when a settled prompt reported
+successful native write, edit, or patch calls, including child-agent writes.
+The sorted unique paths accumulate across the stage's prompt and repair turns;
+a retained thread starts a fresh list for each stage. Successful writes remain
+recorded if a later response fails. Only the final attempt enters run context,
+as for other stage output. This is tracked-tool metadata, not a filesystem
+diff: shell-only changes, deletions, and ACP edits are not added. Patch moves
+name the destination.
+
+Compact, medium and high summaries render the list as a `Files` detail, with
+JSON-escaped paths and the same 8 KiB value bound. The recorded list stays
+complete. Full, truncate and low modes are unchanged; older outcomes without
+the field and stages with no tracked writes have no file-list detail.
+
 A thread is resolved the same way: the edge's `thread_id`, else the node's,
 else the graph's `default_thread`, else the node's first class, else the
 previous node's id. `thread_id` on a node or edge without effective `full`

@@ -49,8 +49,9 @@ pub mod questions;
 pub mod tools;
 
 use std::borrow::Cow;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::mem;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -133,6 +134,10 @@ pub(crate) struct NativeSession {
     inference:       Duration,
     tool:            Duration,
     prompts:         u64,
+    /// Successful native writes across this stage's prompts, never a retained
+    /// thread's lifetime list. Pebble includes child-agent writes in its
+    /// report.
+    files_touched:   BTreeSet<String>,
 }
 
 /// The Pebble profile the model selector resolves to, from the catalog's
@@ -427,6 +432,7 @@ impl NativeSession {
             inference: Duration::ZERO,
             tool: Duration::ZERO,
             prompts: 0,
+            files_touched: BTreeSet::new(),
         };
         if cancel.is_cancelled() {
             session.shutdown(ShutdownReason::Cancelled).await?;
@@ -511,6 +517,8 @@ impl NativeSession {
     }
 
     fn account(&mut self, report: &PromptReport) {
+        self.files_touched
+            .extend(report.files_touched.iter().cloned());
         self.prompts += 1;
         self.usage = self.usage.saturating_add(report.usage);
         self.inference = self.inference.saturating_add(report.timing.inference);
@@ -533,6 +541,10 @@ impl NativeSession {
 
     pub(crate) fn session_id(&self) -> String {
         self.agent.id().to_owned()
+    }
+
+    pub(crate) fn take_files_touched(&mut self) -> Vec<String> {
+        mem::take(&mut self.files_touched).into_iter().collect()
     }
 
     pub(crate) fn metrics(&self) -> BTreeMap<SmolStr, Value> {

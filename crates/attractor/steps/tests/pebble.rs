@@ -17,8 +17,8 @@ use ir::{CancelScopeId, Graph, RunStatus, ScopeId};
 use lithos_llm::types::{ContentPart, ReasoningEffort};
 use pebble_coding_agent::environment::{Environment, ExecRequest};
 use pebble_coding_agent::test_support::{
-    EnvironmentContract, ScriptedCall, ScriptedProvider, client_from, message_text,
-    scripted_client, text_response, tool_call_response,
+    EnvironmentContract, ScriptedCall, ScriptedCompletion, ScriptedProvider, client_from,
+    message_text, scripted_client, text_response, tool_call_response,
 };
 use runtime::driver::{
     DeliverDisposition, EventObserver, ExecutionReport, ObserveError, RunHandle,
@@ -157,6 +157,141 @@ async fn native_tools_edit_and_verify_in_the_scope() {
             "usage": metrics(&report)["pebble.usage"],
         }])
     );
+}
+
+/// The handoff must reach the next model request, not just the public event
+/// view.
+#[tokio::test]
+async fn tracked_files_reach_successor_preambles() {
+    for successor in [
+        r#"b [prompt="Inspect the edit", fidelity="compact"]"#,
+        r#"b [shape=tab, prompt="Inspect the edit", fidelity="compact"]"#,
+        r#"b [prompt="Inspect the edit", fidelity="summary:medium"]"#,
+        r#"b [prompt="Inspect the edit", fidelity="summary:high"]"#,
+    ] {
+        let dir = RunDir::new("tracked-files-preamble");
+        let (client, provider) = client_from(
+            ScriptedProvider::new(vec![
+                ScriptedCall::response(tool_call_response(
+                    "write_file",
+                    "write",
+                    json!({"file_path":"direct-edit.txt","content":"42"}),
+                )),
+                ScriptedCall::response(text_response("Done.")),
+                ScriptedCall::response(text_response("Reviewed.")),
+            ])
+            .completing(vec![ScriptedCompletion::response(text_response(
+                "Reviewed.",
+            ))]),
+        );
+        let source = format!(
+            r#"digraph T {{
+            graph [default_model="test/model"]
+            start [shape=Mdiamond]
+            a [prompt="Make an edit"]
+            {successor}
+            exit [shape=Msquare]
+            start -> a -> b -> exit
+        }}"#
+        );
+        let graph =
+            frontend_attractor::load("test.fabro", &source, &NoFiles, &CompileInputs::new())
+                .graph
+                .expect("workflow");
+        let report = runtime(&dir, client)
+            .run(graph)
+            .await
+            .expect("run and replay");
+        assert_eq!(
+            report.status,
+            RunStatus::Success,
+            "{:?}",
+            report.state.history()
+        );
+        assert_eq!(
+            output_of(&report, "a")["files_touched"],
+            json!(["direct-edit.txt"])
+        );
+        assert!(output_of(&report, "b").get("files_touched").is_none());
+        let requests = provider.requests();
+        assert_eq!(output_of(&report, "b")["text"], "Reviewed.");
+        let completed = provider.completion_requests();
+        let request = if successor.contains("shape=tab") {
+            assert_eq!(requests.len(), 2);
+            assert_eq!(completed.len(), 1);
+            &completed[0]
+        } else {
+            assert_eq!(requests.len(), 3);
+            &requests[2]
+        };
+        let sent = message_text(request.messages().last().expect("successor input"));
+        assert!(sent.contains("Files: [\"direct-edit.txt\"]"), "{sent}");
+    }
+}
+
+#[tokio::test]
+async fn tracked_files_accumulate_across_repairs_even_when_the_stage_fails() {
+    for answer in [r#"{"outcome":"succeeded"}"#, "still not JSON"] {
+        let dir = RunDir::new("tracked-files-repair");
+        let (client, _) = scripted_client(vec![
+            ScriptedCall::response(tool_call_response(
+                "write_file",
+                "first",
+                json!({"file_path":"z.txt","content":"first"}),
+            )),
+            ScriptedCall::response(text_response("not JSON")),
+            ScriptedCall::response(tool_call_response(
+                "write_file",
+                "second",
+                json!({"file_path":"a.txt","content":"second"}),
+            )),
+            ScriptedCall::response(tool_call_response(
+                "write_file",
+                "again",
+                json!({"file_path":"z.txt","content":"updated"}),
+            )),
+            ScriptedCall::response(text_response(answer)),
+        ]);
+        let report = runtime(&dir, client)
+            .run(graph(r#", output_schema="routing", output_retries=1"#))
+            .await
+            .expect("run and replay");
+        let output = output_of(&report, "a");
+        assert_eq!(output["files_touched"], json!(["a.txt", "z.txt"]));
+        assert_eq!(
+            output["outcome"],
+            if answer.starts_with('{') {
+                "succeeded"
+            } else {
+                "failed"
+            }
+        );
+        assert_eq!(metrics(&report)["pebble.prompts"], 2);
+    }
+}
+
+#[tokio::test]
+async fn tracked_files_exclude_shell_writes_and_failed_file_tools() {
+    let dir = RunDir::new("tracked-files-controls");
+    let (client, _) = scripted_client(vec![
+        ScriptedCall::response(tool_call_response(
+            "shell",
+            "shell-write",
+            json!({"command":"printf shell > shell-only.txt"}),
+        )),
+        ScriptedCall::response(tool_call_response(
+            "edit_file",
+            "missing",
+            json!({"file_path":"missing.txt","old_string":"x","new_string":"y"}),
+        )),
+        ScriptedCall::response(text_response("Done.")),
+    ]);
+    let report = runtime(&dir, client)
+        .run(graph(""))
+        .await
+        .expect("run and replay");
+    assert_eq!(report.status, RunStatus::Success);
+    assert!(output_of(&report, "a").get("files_touched").is_none());
 }
 
 /// The node's step config, as the lowering wrote it.
@@ -1343,6 +1478,14 @@ async fn retained_conversation_rebinds_permissions_and_scripts_still_write() {
         RunStatus::Success,
         "{:?}",
         report.state.history()
+    );
+    assert_eq!(
+        output_of(&report, "a")["files_touched"],
+        json!(["first-stage.txt"])
+    );
+    assert!(
+        output_of(&report, "b").get("files_touched").is_none(),
+        "a retained thread must not inherit its predecessor's tracked files"
     );
     assert!(written.exists());
     assert!(!forbidden.exists());
