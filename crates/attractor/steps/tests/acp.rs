@@ -30,10 +30,16 @@ use testkit::{RunDir, backend_event, log_lines, output_of, status_of};
 /// The scripted agent, copied from the test data to where a run can execute
 /// it.
 fn scripted_agent(dir: &RunDir) -> PathBuf {
+    scripted_agent_named(dir, "scripted_acp_agent.py")
+}
+
+/// The scripted agent under `name`: named `codex-acp…`, the client takes it
+/// for codex-acp.
+fn scripted_agent_named(dir: &RunDir, name: &str) -> PathBuf {
     let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/testdata/scripted_acp_agent.py");
     let script =
         fs::read_to_string(&source).unwrap_or_else(|e| panic!("{}: {e}", source.display()));
-    let path = dir.path().join("scripted_acp_agent.py");
+    let path = dir.path().join(name);
     fs::write(&path, script).expect("write the scripted agent");
     path
 }
@@ -263,6 +269,96 @@ async fn every_session_update_is_recorded_as_the_acp_envelope() {
         metrics["acp.context"],
         json!({ "used": 1200, "size": 200_000 }),
         "the last context window report"
+    );
+}
+
+/// codex-acp, and no other agent, is offered native sub-agent sessions at
+/// `initialize`. A child's updates and its permission exchange are recorded
+/// under the child's own session; the stage's answer and its context window
+/// come from the root session alone.
+#[tokio::test]
+async fn codex_subagent_sessions_are_recorded_as_their_own() {
+    let dir = RunDir::new("acp-subagents");
+    let agent = scripted_agent_named(&dir, "codex-acp.py");
+    let initialize = dir.path().join("initialize.json");
+    let graph = with_env(agent_graph(&agent), &[
+        ("ACP_MODE", "subagents"),
+        ("ACP_INITIALIZE_PARAMS", initialize.to_str().expect("utf-8")),
+    ]);
+    let report = run(&dir, graph, MapSecrets::empty()).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let offered: Value = serde_json::from_str(
+        &fs::read_to_string(&initialize).expect("the agent recorded initialize"),
+    )
+    .expect("json");
+    assert_eq!(offered["clientCapabilities"]["subagents"], json!({}));
+    assert_eq!(
+        offered["clientCapabilities"]["_meta"]["jetbrains"]["air"]["capabilities"],
+        json!(["nativeSubagentSessions"])
+    );
+
+    let recorded: Vec<(String, Option<String>)> = envelopes(&report)
+        .iter()
+        .map(|e| {
+            let session = backend_event(e).and_then(|b| b.session);
+            (subject(e), session)
+        })
+        .collect();
+    let root = || Some("sess-1".to_owned());
+    let child = || Some("sess-child".to_owned());
+    assert_eq!(recorded, [
+        ("subagent_spawned".to_owned(), root()),
+        ("tool_call".to_owned(), child()),
+        ("session/request_permission".to_owned(), child()),
+        ("tool_call_update".to_owned(), child()),
+        ("usage_update".to_owned(), child()),
+        ("agent_message_chunk".to_owned(), child()),
+        ("subagent_state_update".to_owned(), root()),
+        ("usage_update".to_owned(), root()),
+        ("agent_message_chunk".to_owned(), root()),
+        ("usage_update".to_owned(), child()),
+    ]);
+    assert_eq!(
+        output_of(&report, "a")["text"],
+        json!("Reviewed."),
+        "the root's text alone"
+    );
+    assert_eq!(
+        metrics(&report)["acp.context"],
+        json!({ "used": 5000, "size": 272_000 }),
+        "the root's window, not the child's later report"
+    );
+}
+
+/// An agent other than codex-acp is not offered sub-agent sessions.
+#[tokio::test]
+async fn other_agents_are_not_offered_subagent_sessions() {
+    let dir = RunDir::new("acp-no-subagents");
+    let agent = scripted_agent(&dir);
+    let initialize = dir.path().join("initialize.json");
+    let graph = with_env(agent_graph(&agent), &[
+        ("ACP_MODE", "plain"),
+        ("ACP_INITIALIZE_PARAMS", initialize.to_str().expect("utf-8")),
+    ]);
+    let report = run(&dir, graph, MapSecrets::empty()).await;
+    assert_eq!(
+        report.status,
+        RunStatus::Success,
+        "{:?}",
+        report.state.errors()
+    );
+    let offered: Value = serde_json::from_str(
+        &fs::read_to_string(&initialize).expect("the agent recorded initialize"),
+    )
+    .expect("json");
+    assert_eq!(
+        offered["clientCapabilities"],
+        json!({ "fs": { "readTextFile": false, "writeTextFile": false } })
     );
 }
 

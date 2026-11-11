@@ -16,12 +16,19 @@
 #   auth             `session/new` is refused with `auth_required` until the
 #                    client authenticates with the advertised API-key
 #                    method; then a plain text turn.
+#   subagents        codex-acp's native sub-agent sessions: the root
+#                    announces a child (`subagent_spawned`), the child
+#                    streams a tool call with a permission request, a usage
+#                    update and text under its own session, the root ends
+#                    it (`subagent_state_update`), reports its own usage and
+#                    answers; a last child usage update follows.
 #
 # Records, each written when the variable is set:
 #   ACP_PERMISSION          the `result` of the permission answer, as JSON
 #   ACP_AUTH_RECORD         the `methodId` the client authenticated with
 #   ACP_ENV_RECORD          the agent's values of ACP_ENV_RECORD_KEYS, as JSON
 #   ACP_SESSION_NEW_PARAMS  the `session/new` params, as JSON
+#   ACP_INITIALIZE_PARAMS   the `initialize` params, as JSON
 #   ACP_WRITE_PATH          the file the edit tool writes (default hello.txt)
 import json
 import os
@@ -55,16 +62,16 @@ def respond(message, result):
     send({"jsonrpc": "2.0", "id": message["id"], "result": result})
 
 
-def update(body):
+def update(body, session=None):
     send({
         "jsonrpc": "2.0",
         "method": "session/update",
-        "params": {"sessionId": session_id, "update": body},
+        "params": {"sessionId": session or session_id, "update": body},
     })
 
 
-def text_chunk(kind, text):
-    update({"sessionUpdate": kind, "content": {"type": "text", "text": text}})
+def text_chunk(kind, text, session=None):
+    update({"sessionUpdate": kind, "content": {"type": "text", "text": text}}, session)
 
 
 def record(variable, value):
@@ -164,6 +171,44 @@ def tools_turn(message):
     })
 
 
+def subagents_turn(message):
+    child = "sess-child"
+    update({
+        "sessionUpdate": "subagent_spawned",
+        "subagentSessionId": child,
+        "name": "Reviewer",
+        "task": "Find the TODOs.",
+    })
+    update({
+        "sessionUpdate": "tool_call",
+        "toolCallId": "call-c1",
+        "title": "rg TODO",
+        "kind": "execute",
+        "status": "pending",
+    }, child)
+    send({
+        "jsonrpc": "2.0",
+        "id": "permission-c1",
+        "method": "session/request_permission",
+        "params": {
+            "sessionId": child,
+            "toolCall": {"toolCallId": "call-c1", "title": "rg TODO", "kind": "execute"},
+            "options": [{"optionId": "once", "name": "Allow once", "kind": "allow_once"}],
+        },
+    })
+    sys.stdin.readline()
+    update({"sessionUpdate": "tool_call_update", "toolCallId": "call-c1", "status": "completed"}, child)
+    update({"sessionUpdate": "usage_update", "used": 90000, "size": 272000}, child)
+    text_chunk("agent_message_chunk", "One TODO.", child)
+    update({"sessionUpdate": "subagent_state_update", "subagentSessionId": child, "state": "completed"})
+    update({"sessionUpdate": "usage_update", "used": 5000, "size": 272000})
+    text_chunk("agent_message_chunk", "Reviewed.")
+    # A late report from the child: it moves neither the answer nor the
+    # stage's context window.
+    update({"sessionUpdate": "usage_update", "used": 95000, "size": 272000}, child)
+    respond(message, {"stopReason": "end_turn"})
+
+
 def plain_turn(message):
     for text in ["hello ", "from acp"]:
         text_chunk("agent_message_chunk", text)
@@ -176,6 +221,7 @@ for line in sys.stdin:
     message = json.loads(line)
     method = message.get("method")
     if method == "initialize":
+        record("ACP_INITIALIZE_PARAMS", json.dumps(message.get("params", {}), separators=(",", ":")))
         result = {"protocolVersion": 1, "agentCapabilities": {}}
         if mode == "auth":
             result["authMethods"] = [
@@ -212,6 +258,8 @@ for line in sys.stdin:
     elif method == "session/prompt":
         if mode == "tools":
             tools_turn(message)
+        elif mode == "subagents":
+            subagents_turn(message)
         else:
             plain_turn(message)
         break
