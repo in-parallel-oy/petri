@@ -203,7 +203,11 @@ impl Session {
                     );
                     client.with_hooks(Arc::new(hooks)).await;
                 }
-                if let Err(error) = client.open_session(ctx.env.workspace_path()).await {
+                let subagents = command.is_codex_acp();
+                if let Err(error) = client
+                    .open_session(ctx.env.workspace_path(), subagents)
+                    .await
+                {
                     client.terminate(ctx.env.grace()).await;
                     return Err(error.into());
                 }

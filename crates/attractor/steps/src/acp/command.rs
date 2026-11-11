@@ -2,6 +2,7 @@
 //! node names, and the environment it gets.
 
 use std::collections::BTreeMap;
+use std::iter;
 
 use executor::{ProcessSpec, SECRET_REF_KEY, SecretProvider, StdinMode};
 use ir::Value;
@@ -91,6 +92,16 @@ impl AgentCommand {
         self
     }
 
+    /// Whether the command launches codex-acp (by path, or as an npm
+    /// package), the one agent offered native sub-agent sessions.
+    pub fn is_codex_acp(&self) -> bool {
+        iter::once(&self.program).chain(&self.args).any(|word| {
+            word.rsplit('/')
+                .next()
+                .is_some_and(|name| name.starts_with("codex-acp"))
+        })
+    }
+
     /// The process to start: the command with its environment resolved. Only
     /// the secrets its `env` names reach the agent. A product's API key is
     /// never added on its own, because some products bill an API key ahead
@@ -164,6 +175,26 @@ mod tests {
         assert_eq!(command.args, ["-c", "print(1)", "--flag"]);
         assert!(AgentCommand::from_command_line("").is_err());
         assert!(AgentCommand::from_command_line("a 'b").is_err());
+    }
+
+    #[test]
+    fn codex_acp_is_known_by_its_program_or_package() {
+        for line in [
+            "codex-acp",
+            "/usr/local/bin/codex-acp",
+            "npx -y @agentclientprotocol/codex-acp@1.13.0",
+        ] {
+            let command = AgentCommand::from_command_line(line).expect("splits");
+            assert!(command.is_codex_acp(), "{line}");
+        }
+        for line in [
+            "claude-agent-acp",
+            "npx -y @agentclientprotocol/claude-agent-acp",
+            "gemini --acp",
+        ] {
+            let command = AgentCommand::from_command_line(line).expect("splits");
+            assert!(!command.is_codex_acp(), "{line}");
+        }
     }
 
     #[test]

@@ -19,6 +19,20 @@
 //! permission request and the answer Petri gave it are recorded the same
 //! way.
 //!
+//! For codex-acp the client advertises native sub-agent sessions
+//! (`clientCapabilities.subagents`, the draft ACP sub-agent RFD): the agent
+//! announces each child on its parent with `subagent_spawned`
+//! (`subagentSessionId`, `name`, `task`), streams the child's messages, tool
+//! calls and permission requests under the child's own session id, and
+//! reports its end on the parent with `subagent_state_update`; the prompt's
+//! response waits for the children. Each envelope carries the session the
+//! message names, so a child's work is recorded under its own session. The
+//! stage's answer and its context window come from the root session alone;
+//! a child's tool calls still pass through the tool hooks. claude-agent-acp
+//! has the same sessions (since 0.71.0) but is not offered them: its
+//! Task/Agent children would move off the root session, a shape no Claude
+//! run has been checked against. Any other agent is not offered them either.
+//!
 //! Tool hooks map onto the two tool boundaries ACP offers. A
 //! `pre_tool_use` hook runs at `session/request_permission`: a block answers
 //! with the rejecting option, so the effect does not happen for that call;
@@ -88,7 +102,9 @@ pub const BACKEND: &str = "acp";
 /// method, update }` for a `session/update`, `{ session_id, seq, method,
 /// params }` for any other notification, and `{ session_id, seq,
 /// tool_call_id?, method, params, outcome }` for a
-/// `session/request_permission` with the answer Petri gave.
+/// `session/request_permission` with the answer Petri gave. `session_id` is
+/// the session the message names, a sub-agent's own for its work, else the
+/// root session.
 pub const ENVELOPE_KIND: &str = "acp";
 
 /// The JSON-RPC error code ACP reserves for `auth_required`.
@@ -370,15 +386,17 @@ impl Client {
     }
 
     /// Record one ACP exchange on the progress channel as the backend
-    /// envelope. `event` is the exchange's own fields; the session and the
-    /// sequence are added here.
+    /// envelope. `event` is the exchange's own fields; the session (the one
+    /// the message named, else the root) and the sequence are added here.
     async fn record(
         &mut self,
+        session: Option<&str>,
         tool_call_id: Option<&str>,
         mut event: serde_json::Map<String, Value>,
     ) {
         self.seq += 1;
-        event.insert("session_id".into(), json!(self.session_id));
+        let session = session.or(self.session_id.as_deref());
+        event.insert("session_id".into(), json!(session));
         event.insert("seq".into(), json!(self.seq));
         if let Some(id) = tool_call_id {
             event.insert("tool_call_id".into(), json!(id));
@@ -461,7 +479,8 @@ impl Client {
         event.insert("params".into(), params.clone());
         event.insert("outcome".into(), outcome.clone());
         event.insert("blocked".into(), json!(blocked));
-        self.record(call.id.as_deref(), event).await;
+        self.record(session_of(params), call.id.as_deref(), event)
+            .await;
         self.send(json!({ "jsonrpc": "2.0", "id": id, "result": { "outcome": outcome } }))
             .await
     }
@@ -497,29 +516,20 @@ impl Client {
     }
 
     async fn on_notification(&mut self, method: &str, params: Value, turn: &mut Turn) {
+        let session = session_of(&params).map(str::to_owned);
         if method != "session/update" {
             let mut event = serde_json::Map::new();
             event.insert("method".into(), json!(method));
             event.insert("params".into(), params);
-            self.record(None, event).await;
+            self.record(session.as_deref(), None, event).await;
             return;
         }
         let update = params.get("update").cloned().unwrap_or(Value::Null);
-        let kind = update
-            .get("sessionUpdate")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        match kind {
-            "agent_message_chunk" => {
-                if let Some(text) = update.pointer("/content/text").and_then(Value::as_str)
-                    && update.pointer("/content/type").and_then(Value::as_str) == Some("text")
-                {
-                    turn.text.push_str(text);
-                }
-            }
-            "tool_call" | "tool_call_update" => self.on_tool_call(&update).await,
-            "usage_update" => self.on_usage_update(&update),
-            _ => {}
+        match feeds(self.session_id.as_deref(), session.as_deref(), &update) {
+            Feeds::Answer(text) => turn.text.push_str(text),
+            Feeds::ToolCall => self.on_tool_call(&update).await,
+            Feeds::Context => self.on_usage_update(&update),
+            Feeds::Nothing => {}
         }
         let tool_call_id = update
             .get("toolCallId")
@@ -528,7 +538,8 @@ impl Client {
         let mut event = serde_json::Map::new();
         event.insert("method".into(), json!(method));
         event.insert("update".into(), update);
-        self.record(tool_call_id.as_deref(), event).await;
+        self.record(session.as_deref(), tool_call_id.as_deref(), event)
+            .await;
     }
 
     /// A `tool_call` or `tool_call_update`: remember the call, warn when it
@@ -640,13 +651,11 @@ impl Client {
     /// `session/new` with `auth_required` is authenticated with the API-key
     /// method it advertised (the key is in its environment), then asked
     /// again.
-    pub async fn open_session(&mut self, cwd: &str) -> Result<(), AcpError> {
+    /// `subagents` offers the agent native sub-agent sessions.
+    pub async fn open_session(&mut self, cwd: &str, subagents: bool) -> Result<(), AcpError> {
         let mut scratch = Turn::default();
         let id = self
-            .request("initialize", json!({
-                "protocolVersion": 1,
-                "clientCapabilities": { "fs": { "readTextFile": false, "writeTextFile": false } },
-            }))
+            .request("initialize", initialize_params(subagents))
             .await?;
         let initialized = self.response(id, "initialize", &mut scratch).await?;
         self.auth_methods = initialized
@@ -852,6 +861,61 @@ fn exit_detail(outcome: Result<ExitStatus, EnvError>) -> String {
     }
 }
 
+/// The `initialize` request: no client file system, and native sub-agent
+/// sessions when `subagents`, so the agent streams each child's work under
+/// the child's own session.
+fn initialize_params(subagents: bool) -> Value {
+    let mut capabilities = json!({ "fs": { "readTextFile": false, "writeTextFile": false } });
+    if subagents {
+        // The draft ACP field, and the `_meta` form codex-acp 1.13 honours:
+        // its SDK strips a capability the schema does not know yet.
+        capabilities["subagents"] = json!({});
+        capabilities["_meta"] = json!({ "jetbrains": { "air": {
+            "version": 1,
+            "capabilities": ["nativeSubagentSessions"],
+        }}});
+    }
+    json!({ "protocolVersion": 1, "clientCapabilities": capabilities })
+}
+
+/// The session a notification or request names.
+fn session_of(params: &Value) -> Option<&str> {
+    params.get("sessionId").and_then(Value::as_str)
+}
+
+/// Whether a message names a session other than the root: a sub-agent's.
+fn is_subagent(root: Option<&str>, session: Option<&str>) -> bool {
+    matches!((root, session), (Some(root), Some(session)) if root != session)
+}
+
+/// What a `session/update` feeds besides its envelope.
+#[derive(Debug, PartialEq, Eq)]
+enum Feeds<'a> {
+    /// Text of the stage's answer.
+    Answer(&'a str),
+    /// The tool hooks, from any session.
+    ToolCall,
+    /// The stage's context window and cost.
+    Context,
+    Nothing,
+}
+
+/// What `update` from `session` feeds: the answer and the context window
+/// come from the root session alone.
+fn feeds<'a>(root: Option<&str>, session: Option<&str>, update: &'a Value) -> Feeds<'a> {
+    let subagent = is_subagent(root, session);
+    match update.get("sessionUpdate").and_then(Value::as_str) {
+        Some("agent_message_chunk") if !subagent => update
+            .pointer("/content/text")
+            .and_then(Value::as_str)
+            .filter(|_| update.pointer("/content/type").and_then(Value::as_str) == Some("text"))
+            .map_or(Feeds::Nothing, Feeds::Answer),
+        Some("tool_call" | "tool_call_update") => Feeds::ToolCall,
+        Some("usage_update") if !subagent => Feeds::Context,
+        _ => Feeds::Nothing,
+    }
+}
+
 /// A JSON-RPC error answer as the typed rejection.
 fn rejected(method: &str, error: &Value) -> AcpError {
     AcpError::Rejected {
@@ -933,5 +997,68 @@ mod tests {
         );
         let claude = json!([{ "id": "claude-login", "name": "Log in with Claude Code" }]);
         assert_eq!(api_key_method(claude.as_array().expect("array")), None);
+    }
+
+    #[test]
+    fn native_subagent_sessions_are_offered_only_when_asked() {
+        let fs = json!({ "readTextFile": false, "writeTextFile": false });
+        assert_eq!(
+            initialize_params(true)["clientCapabilities"],
+            json!({ "fs": fs, "subagents": {}, "_meta": { "jetbrains": { "air": {
+                "version": 1,
+                "capabilities": ["nativeSubagentSessions"],
+            }}}})
+        );
+        assert_eq!(
+            initialize_params(false)["clientCapabilities"],
+            json!({ "fs": fs })
+        );
+    }
+
+    #[test]
+    fn only_the_root_session_feeds_the_answer_and_the_context_window() {
+        let chunk = |text: &str| {
+            json!({ "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": text } })
+        };
+        let usage = json!({ "sessionUpdate": "usage_update", "used": 90_000, "size": 272_000 });
+        let call = json!({ "sessionUpdate": "tool_call", "toolCallId": "call_c1" });
+        let root = Some("thr_root");
+        let (root_chunk, child_chunk) = (chunk("Reviewed."), chunk("One TODO."));
+        let fed: Vec<Feeds<'_>> = [
+            (Some("thr_root"), &root_chunk),
+            (Some("thr_child"), &child_chunk),
+            (Some("thr_child"), &usage),
+            (Some("thr_child"), &call),
+            (Some("thr_root"), &usage),
+            (None, &root_chunk),
+        ]
+        .into_iter()
+        .map(|(session, update)| feeds(root, session, update))
+        .collect();
+        assert_eq!(fed, [
+            Feeds::Answer("Reviewed."),
+            Feeds::Nothing,
+            Feeds::Nothing,
+            Feeds::ToolCall,
+            Feeds::Context,
+            Feeds::Answer("Reviewed."),
+        ]);
+        let image = json!({ "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "image", "text": "x" } });
+        assert_eq!(feeds(root, root, &image), Feeds::Nothing);
+    }
+
+    #[test]
+    fn only_a_session_other_than_the_root_is_a_subagent() {
+        let child = json!({ "sessionId": "thr_child", "update": {} });
+        assert_eq!(session_of(&child), Some("thr_child"));
+        assert!(is_subagent(Some("thr_root"), session_of(&child)));
+        assert!(!is_subagent(Some("thr_child"), session_of(&child)));
+        assert!(!is_subagent(
+            Some("thr_root"),
+            session_of(&json!({ "update": {} }))
+        ));
+        assert!(!is_subagent(None, Some("thr_child")), "no root yet");
     }
 }
